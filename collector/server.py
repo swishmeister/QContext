@@ -177,68 +177,115 @@ def duo_pairs(anchor, people, get_match, tags):
 
 class Store:
     def __init__(self, path):
+        self.database_url = os.environ.get('DATABASE_URL')
+        self.is_postgres = bool(self.database_url)
         self.path = str(path)
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        if not self.is_postgres:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+
         with self.connect() as db:
-            db.execute('PRAGMA journal_mode=WAL')
-            db.execute('CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
-            db.execute('CREATE TABLE IF NOT EXISTS windows (puuid TEXT, before_ms INTEGER, payload TEXT NOT NULL, PRIMARY KEY (puuid,before_ms))')
-            db.execute('CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, puuid TEXT, observed_ms INTEGER, payload TEXT NOT NULL)')
-            db.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_puuid_observed ON snapshots(puuid,observed_ms DESC)')
-            db.execute('CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, payload TEXT NOT NULL)')
-            db.execute('CREATE TABLE IF NOT EXISTS roster_snapshots (match_id TEXT PRIMARY KEY)')
-            db.execute("CREATE TABLE IF NOT EXISTS duo_tags (match_id TEXT NOT NULL,a TEXT NOT NULL,b TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('duo','not_duo')),recorded_ms INTEGER NOT NULL,PRIMARY KEY(match_id,a,b))")
+            if not self.is_postgres:
+                self.execute(db, 'PRAGMA journal_mode=WAL')
+
+            self.execute(db, 'CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+            self.execute(db, 'CREATE TABLE IF NOT EXISTS windows (puuid TEXT, before_ms BIGINT, payload TEXT NOT NULL, PRIMARY KEY (puuid,before_ms))')
+
+            if self.is_postgres:
+                self.execute(db, 'CREATE TABLE IF NOT EXISTS snapshots (id BIGSERIAL PRIMARY KEY, puuid TEXT, observed_ms BIGINT, payload TEXT NOT NULL)')
+            else:
+                self.execute(db, 'CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, puuid TEXT, observed_ms INTEGER, payload TEXT NOT NULL)')
+
+            self.execute(db, 'CREATE INDEX IF NOT EXISTS idx_snapshots_puuid_observed ON snapshots(puuid,observed_ms DESC)')
+            self.execute(db, 'CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+            self.execute(db, 'CREATE TABLE IF NOT EXISTS roster_snapshots (match_id TEXT PRIMARY KEY)')
+            self.execute(db, "CREATE TABLE IF NOT EXISTS duo_tags (match_id TEXT NOT NULL,a TEXT NOT NULL,b TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('duo','not_duo')),recorded_ms BIGINT NOT NULL,PRIMARY KEY(match_id,a,b))")
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=20)
-        try:
-            with db:
+        if self.is_postgres:
+            import psycopg2
+
+            db = psycopg2.connect(self.database_url, connect_timeout=20)
+            try:
                 yield db
-        finally:
-            db.close()
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+        else:
+            db = sqlite3.connect(self.path, timeout=20)
+            try:
+                with db:
+                    yield db
+            finally:
+                db.close()
+
+    def execute(self, db, sql, params=()):
+        if self.is_postgres:
+            cursor = db.cursor()
+            cursor.execute(sql.replace('?', '%s'), params)
+            return cursor
+        return db.execute(sql, params)
 
     def setting(self, name, default=None):
         with self.connect() as db:
-            row = db.execute('SELECT payload FROM settings WHERE name=?', (name,)).fetchone()
+            row = self.execute(db, 'SELECT payload FROM settings WHERE name=?', (name,)).fetchone()
         return json.loads(row[0]) if row else default
 
     def put_setting(self, name, value):
         with self.connect() as db:
-            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (name, json.dumps(value)))
+            self.execute(
+                db,
+                'INSERT INTO settings (name,payload) VALUES (?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload',
+                (name, json.dumps(value)),
+            )
 
     def duo_tags(self, mid):
         with self.connect() as db:
-            rows = db.execute('SELECT a,b,status,recorded_ms FROM duo_tags WHERE match_id=? ORDER BY a,b',(mid,)).fetchall()
+            rows = self.execute(db, 'SELECT a,b,status,recorded_ms FROM duo_tags WHERE match_id=? ORDER BY a,b', (mid,)).fetchall()
         return [dict(players=[a,b],status=status,recordedAt=at) for a,b,status,at in rows]
 
     def match(self, match_id):
         with self.connect() as db:
-            row = db.execute('SELECT payload FROM matches WHERE id=?', (match_id,)).fetchone()
+            row = self.execute(db, 'SELECT payload FROM matches WHERE id=?', (match_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
     def put_match(self, match):
         with self.connect() as db:
-            db.execute('INSERT OR REPLACE INTO matches VALUES (?,?)', (match['metadata']['matchId'], json.dumps(match)))
+            self.execute(
+                db,
+                'INSERT INTO matches (id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload',
+                (match['metadata']['matchId'], json.dumps(match)),
+            )
 
     def window(self, puuid, before_ms):
         with self.connect() as db:
-            row = db.execute('SELECT payload FROM windows WHERE puuid=? AND before_ms=?', (puuid, before_ms)).fetchone()
+            row = self.execute(db, 'SELECT payload FROM windows WHERE puuid=? AND before_ms=?', (puuid, before_ms)).fetchone()
         return json.loads(row[0]) if row else None
 
     def put_window(self, puuid, before_ms, value):
         with self.connect() as db:
-            db.execute('INSERT OR REPLACE INTO windows VALUES (?,?,?)', (puuid, before_ms, json.dumps(value)))
+            self.execute(
+                db,
+                'INSERT INTO windows (puuid,before_ms,payload) VALUES (?,?,?) ON CONFLICT(puuid,before_ms) DO UPDATE SET payload=excluded.payload',
+                (puuid, before_ms, json.dumps(value)),
+            )
 
     def snapshot(self, puuid):
         with self.connect() as db:
-            row = db.execute('SELECT observed_ms,payload FROM snapshots WHERE puuid=? ORDER BY observed_ms DESC LIMIT 1', (puuid,)).fetchone()
+            row = self.execute(db, 'SELECT observed_ms,payload FROM snapshots WHERE puuid=? ORDER BY observed_ms DESC LIMIT 1', (puuid,)).fetchone()
         return dict(observedAt=row[0], **json.loads(row[1])) if row else None
 
     def put_snapshot(self, puuid, payload):
         with self.connect() as db:
-            db.execute('INSERT INTO snapshots (puuid,observed_ms,payload) VALUES (?,?,?)', (puuid, int(time.time()*1000), json.dumps(payload)))
-
+            self.execute(
+                db,
+                'INSERT INTO snapshots (puuid,observed_ms,payload) VALUES (?,?,?)',
+                (puuid, int(time.time()*1000), json.dumps(payload)),
+            )
 
 class RateLimiter:
     """One key's budgets, independently scoped by routing host and method."""
@@ -594,13 +641,13 @@ class Collector:
                 raise ValueError('A duo must contain two players on the same team in this match.')
             with self.store.connect() as db:
                 if status=='clear':
-                    db.execute('DELETE FROM duo_tags WHERE match_id=? AND a=? AND b=?',(mid,a,b))
+                    self.store.execute(db,'DELETE FROM duo_tags WHERE match_id=? AND a=? AND b=?',(mid,a,b))
                 else:
                     if status=='duo':
-                        existing = db.execute("SELECT a,b FROM duo_tags WHERE match_id=? AND status='duo'",(mid,)).fetchall()
+                        existing = self.store.execute(db,"SELECT a,b FROM duo_tags WHERE match_id=? AND status='duo'",(mid,)).fetchall()
                         if any((x,y)!=(a,b) and ({x,y}&{a,b}) for x,y in existing):
                             raise ValueError('One player already has a confirmed duo partner in this match. Clear that tag first.')
-                    db.execute('INSERT OR REPLACE INTO duo_tags VALUES (?,?,?,?,?)',(mid,a,b,status,int(time.time()*1000)))
+                    self.store.execute(db,'INSERT INTO duo_tags (match_id,a,b,status,recorded_ms) VALUES (?,?,?,?,?) ON CONFLICT(match_id,a,b) DO UPDATE SET status=excluded.status, recorded_ms=excluded.recorded_ms',(mid,a,b,status,int(time.time()*1000)))
 
     def get_match(self, api, match_id):
         cached = self.store.match(match_id)
@@ -655,7 +702,7 @@ class Collector:
     def ranks(self, api, match, seen):
         mid = match['metadata']['matchId']
         with self.store.connect() as db:
-            captured = db.execute('SELECT 1 FROM roster_snapshots WHERE match_id=?',(mid,)).fetchone()
+            captured = self.store.execute(db,'SELECT 1 FROM roster_snapshots WHERE match_id=?',(mid,)).fetchone()
         latest = self.store.setting('anchors',[])
         if captured and latest and mid != latest[0]:
             return
@@ -677,7 +724,7 @@ class Collector:
                 self.update(warning='Some rank snapshots could not be fetched. Match-history research continues.')
         if successful:
             with self.store.connect() as db:
-                db.execute('INSERT OR IGNORE INTO roster_snapshots VALUES (?)',(mid,))
+                self.store.execute(db,'INSERT INTO roster_snapshots (match_id) VALUES (?) ON CONFLICT(match_id) DO NOTHING',(mid,))
 
     def activate_account(self, account):
         """Preserve each profile's anchors while sharing the immutable match cache."""
@@ -812,8 +859,8 @@ class Collector:
                                gap=round(ally_mean-enemy_mean,2) if complete else None,
                                historiesReady=sum(p['history'] is not None for p in people)))
         with self.store.connect() as db:
-            snapshots = db.execute('SELECT COUNT(*) FROM snapshots').fetchone()[0]
-            cached = db.execute('SELECT COUNT(*) FROM matches').fetchone()[0]
+            snapshots = self.store.execute(db,'SELECT COUNT(*) FROM snapshots').fetchone()[0]
+            cached = self.store.execute(db,'SELECT COUNT(*) FROM matches').fetchone()[0]
         account = self.account or {}
         icon = account.get('profileIconId')
         if icon is None and result:
@@ -857,7 +904,7 @@ def handler_class(collector, *, port=8766, public_origin=None):
                 return self.send(403,{'error':'Local access only.'})
             if self.path == '/api/health':
                 with collector.store.connect() as db:
-                    db.execute('SELECT 1')
+                    collector.store.execute(db,'SELECT 1')
                 return self.send(200,{'ok':True})
             if self.path == '/api/status':
                 return self.send(200,dict(collector.view(),csrf=csrf))

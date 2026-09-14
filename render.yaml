@@ -1,6 +1,4 @@
-# Free testing deployment.
-# SQLite data is temporary and can be lost whenever Render restarts,
-# redeploys, or spins down the service.
+# Free testing deployment using Render PostgreSQL for persistent app data.
 
 services:
   - type: web
@@ -18,5 +16,13 @@ services:
       - key: QUEUE_CONTEXT_PASSWORD
         sync: false
 
-      - key: QUEUE_CONTEXT_DATA_DIR
-        value: /var/data
+      - key: DATABASE_URL
+        fromDatabase:
+          name: queue-context-db
+          property: connectionString
+
+databases:
+  - name: queue-context-db
+    plan: free
+    databaseName: queue_context
+    user: queue_context

@@ -7,16 +7,15 @@ COPY . .
 RUN pnpm typecheck && pnpm build
 
 FROM node:22-bookworm-slim
-RUN apt-get update && apt-get install --yes --no-install-recommends python3 ca-certificates \
+RUN apt-get update && apt-get install --yes --no-install-recommends python3 python3-psycopg2 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-ENV NODE_ENV=production PORT=10000 QUEUE_CONTEXT_DATA_DIR=/var/data
+ENV NODE_ENV=production PORT=10000
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY public ./public
 COPY collector ./collector
 COPY scripts ./scripts
 COPY package.json ./package.json
-RUN mkdir -p /var/data
 EXPOSE 10000
 CMD ["node", "scripts/start-production.mjs"]
