@@ -26,6 +26,7 @@ Choose **Connect & import 20 matches**. A cold import can take roughly 60–90 m
 - Prior win rate, win/loss streak, champion/role familiarity, most-played role(s), and main-role/off-role tags. Ties share main-role status; missing histories are labeled. Support is displayed as Support.
 - Team averages of observed rank include all five players, excluding missing/unranked records and showing coverage. Ranks are placed on a display scale with 100 LP per division, averaged, and rounded to the nearest LP. Apex tiers share a Master+ LP scale; this is not internal MMR or an official team rank.
 - Summoner icons from Riot Data Dragon (asset version 16.18.1), using the selected summoner profile or latest cached match as a fallback.
+- Duo labels per match: manually confirmed pairs, manual dismissals, and possible duos inferred from at least three earlier same-team matches present in both players’ available history windows. Suggestions never establish premade status, and no suggestion does not establish solo queue. The anchor match, future games and games as opponents are excluded. Manual labels persist in SQLite and exports, include their source/time, and can be cleared; clearing a dismissal restores any applicable suggestion. A player may have only one manually confirmed partner per match.
 - Account level from the shared match record. Low account level is not treated as proof of a smurf.
 - Optional current rank observations, timestamped when fetched. These are never represented as rank at the time of an older game.
 

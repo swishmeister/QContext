@@ -15,6 +15,7 @@ Given information available before a completed Ranked Solo/Duo match began, how 
 | Off-role play | Count per team, plus fraction of earlier games played in the selected role | A player with 9 Jungle / 8 Mid games differs from a player with 20 Mid / 0 Jungle games; binary tags alone lose that distinction. |
 | Champion familiarity | Prior games on the selected champion, optionally paired with role familiarity | Champion-specific win rates from one or two games are unreliable. Avoid counting the same evidence twice. |
 | Rank spread / matchup | Within-team variation and matched-role differences | The same average rank can hide very different team compositions. Test whether this adds useful information. |
+| Duo queue | Separate manually confirmed labels from repeated co-teaming evidence, with a missing/unknown category | Do not treat suggestions as known premades or absence as solo queue. Any coordination effect must be learned and validated; no fixed win-probability bonus. |
 | Side and patch | Blue/red side and patch identifiers | Conditions change over time. Rank distributions and champion balance may shift. |
 
 Account level should initially remain descriptive. It is not evidence of a smurf by itself, and account age proxies can mislead. Do not infer internal MMR.

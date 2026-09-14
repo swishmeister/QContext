@@ -9,7 +9,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from collector.server import Collector, Paused, RateLimiter, RiotClient, RiotError, Store, average_rank, handler_class, parse_riot_id, summarize_history
+from collector.server import Collector, Paused, RateLimiter, RiotClient, RiotError, Store, average_rank, duo_pairs, handler_class, parse_riot_id, summarize_history
 
 
 def match(mid, start, wins=(), duration=1800, queue=420):
@@ -64,6 +64,22 @@ class StoreTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_duo_tags_persist_per_match_and_prevent_conflicting_partners(self):
+        self.store.put_match(match('anchor',100_000_000))
+        self.store.put_setting('anchors',['anchor'])
+        self.collector.tag_duo('anchor',['p1','p0'],'duo')
+        tags=Collector(self.store).store.duo_tags('anchor')
+        self.assertEqual(tags[0]['players'],['p0','p1'])
+        self.assertEqual(tags[0]['status'],'duo')
+        self.assertEqual(self.store.duo_tags('other-match'),[])
+        for pair in (['p0','p2'],['p0','p5'],['p0','p0'],['p0','missing']):
+            with self.assertRaises(ValueError):
+                self.collector.tag_duo('anchor',pair,'duo')
+        self.collector.tag_duo('anchor',['p0','p1'],'not_duo')
+        self.assertEqual(self.store.duo_tags('anchor')[0]['status'],'not_duo')
+        self.collector.tag_duo('anchor',['p1','p0'],'clear')
+        self.assertEqual(self.store.duo_tags('anchor'),[])
 
     def test_profile_switch_restores_anchors_and_uses_supplied_riot_id(self):
         first = {'puuid':'p0','gameName':'First','tagLine':'NA1'}
@@ -199,6 +215,14 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(request('/api/pause', b'{}', **{'Content-Type': 'application/json'})[0], 403)
             self.assertEqual(request('/api/pause', b'{}', **{'Content-Type': 'application/json', 'X-Queue-Lab-Token': status['csrf']})[0], 200)
             self.assertNotIn('csrf', request('/api/export')[1])
+            self.store.put_match(match('anchor',100_000_000))
+            self.store.put_setting('anchors',['anchor'])
+            self.collector.account={'puuid':'p0'}
+            body=json.dumps({'matchId':'anchor','players':['p0','p1'],'status':'duo'}).encode()
+            self.assertEqual(request('/api/duo',body,**{'Content-Type':'application/json'})[0],403)
+            self.assertEqual(request('/api/duo',body,**{'Content-Type':'application/json','X-Queue-Lab-Token':status['csrf']})[0],200)
+            exported=request('/api/export')[1]['matches'][0]['duoPairs']
+            self.assertEqual((exported[0]['status'],exported[0]['source']),('duo','manual'))
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -237,6 +261,36 @@ class RankAndSearchTests(unittest.TestCase):
         for value in ('name','name#','#tag','name#tag#extra',None,'bad\nname#tag'):
             with self.assertRaises(ValueError):
                 parse_riot_id(value)
+
+
+class DuoEvidenceTests(unittest.TestCase):
+    def test_only_prior_same_team_matches_count_once(self):
+        anchor=match('anchor',100_000_000)
+        records={f'h{i}':match(f'h{i}',10_000_000+i*2_000_000) for i in range(4)}
+        records['h3']['info']['participants'][1]['teamId']=200
+        records.update(anchor=anchor,future=match('future',110_000_000))
+        hist={'matchIds':list(records)+['h0'],'complete':True}
+        people=[{'puuid':f'p{i}','team':100,'history':hist} for i in range(2)]
+        pairs=duo_pairs(anchor,people,records.get,[])
+        self.assertEqual(len(pairs),1)
+        self.assertEqual(pairs[0]['sharedGames'],3)
+        self.assertEqual(pairs[0]['status'],'possible')
+        self.assertEqual(pairs[0]['matchIds'],['h0','h1','h2'])
+        people[1]['team']=200
+        self.assertEqual(duo_pairs(anchor,people,records.get,[]),[])
+
+    def test_manual_override_and_incomplete_evidence_are_explicit(self):
+        anchor=match('anchor',100_000_000)
+        records={f'h{i}':match(f'h{i}',10_000_000+i*2_000_000) for i in range(3)}
+        people=[{'puuid':f'p{i}','team':100,'history':{'matchIds':list(records),'complete':False}} for i in range(3)]
+        tags=[{'players':['p0','p1'],'status':'duo','recordedAt':123}]
+        pairs=duo_pairs(anchor,people,records.get,tags)
+        self.assertEqual(len(pairs),1)
+        self.assertEqual(pairs[0]['source'],'manual')
+        self.assertFalse(pairs[0]['historyComplete'])
+        tags[0]['status']='not_duo'
+        pair=next(p for p in duo_pairs(anchor,people,records.get,tags) if p['players']==['p0','p1'])
+        self.assertEqual(pair['status'],'not_duo')
 
 
 class RiotClientTests(unittest.TestCase):

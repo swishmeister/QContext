@@ -14,6 +14,7 @@ import urllib.request
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import combinations
 from pathlib import Path
 from statistics import mean
 
@@ -123,6 +124,37 @@ def summarize_history(games, puuid, before_ms, champion=None, role=None, missing
                 streak=streak, matchIds=[g['metadata']['matchId'] for g in valid])
 
 
+def duo_pairs(anchor, people, get_match, tags):
+    """Repeated co-teaming is evidence, never API confirmation of a premade."""
+    cutoff = timing(anchor)[0]
+    manual = {tuple(t['players']):t for t in tags}
+    confirmed = {p for t in tags if t['status']=='duo' for p in t['players']}
+    records, result = {}, []
+    for a,b in combinations(people,2):
+        if a['team'] != b['team']:
+            continue
+        pair = tuple(sorted([a['puuid'],b['puuid']]))
+        ah,bh = a.get('history') or {},b.get('history') or {}
+        shared = []
+        for mid in sorted(set(ah.get('matchIds',[])) & set(bh.get('matchIds',[]))):
+            if mid not in records:
+                records[mid] = get_match(mid)
+            match = records[mid]
+            if not match or mid==anchor['metadata']['matchId'] or not eligible(match) or timing(match)[0]>=cutoff or timing(match)[1]>cutoff:
+                continue
+            pa,pb = participant(match,pair[0]),participant(match,pair[1])
+            if pa and pb and pa['teamId']==pb['teamId']:
+                shared.append(mid)
+        tag = manual.get(pair)
+        # Don't propose conflicting partners for a manually confirmed duo.
+        if not tag and (len(shared)<3 or any(p in confirmed for p in pair)):
+            continue
+        result.append(dict(players=list(pair),status=tag['status'] if tag else 'possible',
+                           source='manual' if tag else 'history',recordedAt=tag.get('recordedAt') if tag else None,
+                           sharedGames=len(shared),matchIds=shared,historyComplete=bool(ah.get('complete') and bh.get('complete'))))
+    return result
+
+
 class Store:
     def __init__(self, path):
         self.path = str(path)
@@ -135,6 +167,7 @@ class Store:
             db.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_puuid_observed ON snapshots(puuid,observed_ms DESC)')
             db.execute('CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, payload TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS roster_snapshots (match_id TEXT PRIMARY KEY)')
+            db.execute("CREATE TABLE IF NOT EXISTS duo_tags (match_id TEXT NOT NULL,a TEXT NOT NULL,b TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('duo','not_duo')),recorded_ms INTEGER NOT NULL,PRIMARY KEY(match_id,a,b))")
 
     @contextmanager
     def connect(self):
@@ -153,6 +186,11 @@ class Store:
     def put_setting(self, name, value):
         with self.connect() as db:
             db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (name, json.dumps(value)))
+
+    def duo_tags(self, mid):
+        with self.connect() as db:
+            rows = db.execute('SELECT a,b,status,recorded_ms FROM duo_tags WHERE match_id=? ORDER BY a,b',(mid,)).fetchall()
+        return [dict(players=[a,b],status=status,recordedAt=at) for a,b,status,at in rows]
 
     def match(self, match_id):
         with self.connect() as db:
@@ -331,6 +369,29 @@ class Collector:
             if self.thread and self.thread.is_alive():
                 self.stop.set()
                 self.update(status='pausing',message='Pausing after the current request…')
+
+    def tag_duo(self, mid, players, status):
+        with self.lock:
+            if not isinstance(mid,str) or not isinstance(players,list) or len(players)!=2 or not all(isinstance(p,str) for p in players) or len(set(players))!=2 or status not in ('duo','not_duo','clear'):
+                raise ValueError('Choose two different teammates and a valid duo label.')
+            if mid not in self.store.setting('anchors',[]):
+                raise ValueError('Select a match from the current profile.')
+            match = self.store.match(mid)
+            if not match:
+                raise ValueError('The selected match record is unavailable.')
+            a,b = sorted(players)
+            pa,pb = participant(match,a),participant(match,b)
+            if not pa or not pb or pa['teamId']!=pb['teamId']:
+                raise ValueError('A duo must contain two players on the same team in this match.')
+            with self.store.connect() as db:
+                if status=='clear':
+                    db.execute('DELETE FROM duo_tags WHERE match_id=? AND a=? AND b=?',(mid,a,b))
+                else:
+                    if status=='duo':
+                        existing = db.execute("SELECT a,b FROM duo_tags WHERE match_id=? AND status='duo'",(mid,)).fetchall()
+                        if any((x,y)!=(a,b) and ({x,y}&{a,b}) for x,y in existing):
+                            raise ValueError('One player already has a confirmed duo partner in this match. Clear that tag first.')
+                    db.execute('INSERT OR REPLACE INTO duo_tags VALUES (?,?,?,?,?)',(mid,a,b,status,int(time.time()*1000)))
 
     def get_match(self, api, match_id):
         cached = self.store.match(match_id)
@@ -525,6 +586,7 @@ class Collector:
             ally_mean = round(mean(p['history']['winRate'] for p in allies),2) if complete else None
             enemy_mean = round(mean(p['history']['winRate'] for p in enemies),2) if complete else None
             result.append(dict(id=mid,startedAt=start,duration=duration,win=bool(me['win']),champion=me.get('championName'),
+                               duoPairs=duo_pairs(match,people,self.store.match,self.store.duo_tags(mid)),
                                teamRanks={'allies':average_rank([p for p in people if p['team']==me['teamId']]),'enemies':average_rank(enemies)},
                                team=me['teamId'],participants=people,complete=complete,allyMean=ally_mean,enemyMean=enemy_mean,
                                gap=round(ally_mean-enemy_mean,2) if complete else None,
@@ -592,10 +654,16 @@ def handler_class(collector):
                     collector.start(body.get('key'),body.get('riotId'))
                 elif self.path == '/api/pause':
                     collector.pause()
+                elif self.path == '/api/duo':
+                    collector.tag_duo(body.get('matchId'),body.get('players'),body.get('status'))
                 else:
                     return self.send(404,{'error':'Not found.'})
                 return self.send(200,{'ok':True})
-            except (ValueError,TypeError):
+            except ValueError as e:
+                if self.path=='/api/duo':
+                    return self.send(400,{'error':str(e)})
+                return self.send(400,{'error':'Check your key, or wait for the current import to stop before refreshing.'})
+            except TypeError:
                 return self.send(400,{'error':'Check your key, or wait for the current import to stop before refreshing.'})
 
     return Handler
