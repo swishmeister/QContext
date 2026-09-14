@@ -363,7 +363,7 @@ class RiotClientTests(unittest.TestCase):
         with patch('collector.server.urllib.request.urlopen', return_value=response) as request:
             self.assertEqual(client.get('americas', '/test', 'account')['puuid'], 'synthetic-player')
         headers = {k.lower(): v for k, v in request.call_args.args[0].header_items()}
-        self.assertEqual(headers['user-agent'], 'QueueLab/0.1 (local personal research)')
+        self.assertEqual(headers['user-agent'], 'QueueContext/0.1 (local personal research)')
         self.assertEqual(headers['x-riot-token'], 'synthetic-test-key')
 
     def test_edge_block_is_distinguished_from_api_key_rejection(self):

@@ -476,7 +476,7 @@ class RiotClient:
             slot = self.pool.acquire(host,method,self.stop,only)
             req = urllib.request.Request(url, headers={
                 'X-Riot-Token': slot.value, 'Accept': 'application/json',
-                'User-Agent': 'QueueLab/0.1 (local personal research)',
+                'User-Agent': 'QueueContext/0.1 (local personal research)',
             })
             self.calls += 1
             self.update(requests=self.calls)
@@ -898,7 +898,7 @@ if __name__ == '__main__':
     store = Store(ROOT/'data'/'queue-lab.sqlite3')
     collector = Collector(store)
     server = ThreadingHTTPServer(('127.0.0.1',8766),handler_class(collector))
-    print('Queue Lab collector listening on http://127.0.0.1:8766',flush=True)
+    print('Queue Context collector listening on http://127.0.0.1:8766',flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

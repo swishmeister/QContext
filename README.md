@@ -1,4 +1,4 @@
-# Queue Lab
+# Queue Context
 
 A local League of Legends research pilot for **North American accounts**, starting with Llewellyn#300. Use the profile search to import another full Riot ID (Name#Tag). It compares the recent histories of your teammates and opponents across your latest 20 completed Ranked Solo/Duo games.
 
@@ -6,7 +6,7 @@ The first version is an exploratory dashboard, not a test that proves or disprov
 
 ## Run locally
 
-Requirements: Node.js 22.13 or newer, pnpm, and Python 3.11 or newer. Python uses only its standard library. On this computer, the launcher can also use the bundled Codex Python runtime. Set `QUEUE_LAB_PYTHON` to choose another Python executable.
+Requirements: Node.js 22.13 or newer, pnpm, and Python 3.11 or newer. Python uses only its standard library. On this computer, the launcher can also use the bundled Codex Python runtime. Set `QUEUE_CONTEXT_PYTHON` to choose another Python executable.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -79,4 +79,4 @@ Riot endpoints used: account-v1 by Riot ID and match-v5 on `americas`, and leagu
 
 This repository is local, on branch `main`, with no remote configured.
 
-Queue Lab is not endorsed by Riot Games and does not reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games and all associated properties are trademarks or registered trademarks of Riot Games, Inc.
+Queue Context is not endorsed by Riot Games and does not reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games and all associated properties are trademarks or registered trademarks of Riot Games, Inc.
