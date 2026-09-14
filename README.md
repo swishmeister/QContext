@@ -41,9 +41,12 @@ The cards below the account show current rank, win rate over the displayed last 
 
 - Your latest 20 available ranked Solo/Duo matches, excluding games shorter than three minutes as a remake approximation.
 - For every participant, up to 20 eligible matches **completed before the shared match began**. Your own history is shown but excluded from teammate averages.
+- Summoner icons from the shared match record and champion portraits mapped by champion ID to Riot Data Dragon 16.18.1 (catalogue in `lib/champion-icons.json`). Missing icons fall back to initials.
+- Champion habits use complete prior 20-game windows: **One-trick pattern** = 16+ games; **Main pick** = most-played champion (ties allowed) with 6+ games; **Flex pick** = 1+ games otherwise; **First in 20** = zero games. Incomplete histories are unclassified. These are descriptive tags for the window, not lifetime mastery, proof of a one-trick account, or proof the player has never used the champion.
 - Prior win rate, win/loss streak, champion/role familiarity, most-played role(s), and main-role/off-role tags. Ties share main-role status; missing histories are labeled. Support is displayed as Support.
 - Team averages of observed rank include all five players, excluding missing/unranked records and showing coverage. Ranks are placed on a display scale with 100 LP per division, averaged, and rounded to the nearest LP. Apex tiers share a Master+ LP scale; this is not internal MMR or an official team rank.
 - Summoner icons from Riot Data Dragon (asset version 16.18.1), using the selected summoner profile or latest cached match as a fallback.
+- Duo controls sit in a compact expandable row below the player cards; the individual cards retain their duo badges.
 - Duo labels per match: manually confirmed pairs, manual dismissals, and possible duos inferred from at least three earlier same-team matches present in both players’ available history windows. Suggestions never establish premade status, and no suggestion does not establish solo queue. The anchor match, future games and games as opponents are excluded. Manual labels persist in SQLite and exports, include their source/time, and can be cleared; clearing a dismissal restores any applicable suggestion. A player may have only one manually confirmed partner per match.
 - Account level from the shared match record. Low account level is not treated as proof of a smurf.
 - Optional current rank observations, timestamped when fetched. These are never represented as rank at the time of an older game.

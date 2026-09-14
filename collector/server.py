@@ -98,6 +98,20 @@ def participant(match, puuid):
     return next((p for p in match['info']['participants'] if p.get('puuid') == puuid), None)
 
 
+def champion_habit(counts, champion, n, complete):
+    """Descriptive labels for this complete prior window, never lifetime mastery."""
+    if not complete or n!=WINDOW or not champion or sum(counts.values())!=n:
+        return 'unknown'
+    played = counts.get(champion,0)
+    if played==0:
+        return 'first_in_20'
+    if played>=16:
+        return 'one_trick'
+    if played>=6 and played==max(counts.values()):
+        return 'main'
+    return 'flex'
+
+
 def summarize_history(games, puuid, before_ms, champion=None, role=None, missing=0):
     # Recheck chronology even for cached data: current/future outcomes never enter a window.
     valid = [g for g in games if eligible(g) and timing(g)[1] <= before_ms
@@ -110,6 +124,8 @@ def summarize_history(games, puuid, before_ms, champion=None, role=None, missing
     main_roles = sorted(r for r,c in role_counts.items() if c==main_count)
     current_role = ROLES.get(role)
     role_status = ('main' if current_role in main_roles else 'off') if current_role and main_roles else 'unknown'
+    champion_counts = Counter(p['championName'] for p in players if p.get('championName'))
+    complete = len(players)==WINDOW and missing==0
     wins = sum(p.get('win') is True for p in players)
     streak = 0
     if players:
@@ -120,7 +136,8 @@ def summarize_history(games, puuid, before_ms, champion=None, role=None, missing
             streak += 1 if first else -1
     return dict(n=len(players), wins=wins, losses=len(players)-wins,
                 winRate=round(100*wins/len(players), 1) if players else None,
-                complete=len(players) == WINDOW and missing == 0, missing=missing,
+                complete=complete, missing=missing,
+                championCounts=dict(champion_counts),championHabit=champion_habit(champion_counts,champion,len(players),complete),
                 championGames=sum(p.get('championName') == champion for p in players),
                 roleGames=sum(p.get('teamPosition') == role for p in players) if role else None,
                 mainRoles=main_roles,mainRoleGames=main_count,roleCounts=dict(role_counts),roleStatus=role_status,
@@ -779,7 +796,8 @@ class Collector:
                         hist = summarize_history(games,p['puuid'],start,p.get('championName'),p.get('teamPosition'),saved.get('missing',0))
                         self.summary_cache[cache_key] = hist
                 people.append(dict(puuid=p['puuid'],name=p.get('riotIdGameName') or p.get('summonerName') or 'Unknown player',
-                                   tag=p.get('riotIdTagline',''),champion=p.get('championName',''),role=p.get('teamPosition',''),
+                                   tag=p.get('riotIdTagline',''),champion=p.get('championName',''),championId=p.get('championId'),
+                                   profileIconId=p.get('profileIcon'),role=p.get('teamPosition',''),
                                    level=p.get('summonerLevel'),team=p['teamId'],isSelf=p['puuid']==self.account['puuid'],
                                    history=hist,rankSnapshot=self.store.snapshot(p['puuid'])))
             allies = [p for p in people if p['team']==me['teamId'] and not p['isSelf']]

@@ -23,6 +23,31 @@ def match(mid, start, wins=(), duration=1800, queue=420):
 
 
 class HistoryTests(unittest.TestCase):
+    def test_champion_habits_use_complete_prior_twenty_only(self):
+        for count,expected in [(0,'first_in_20'),(1,'flex'),(5,'flex'),(6,'main'),(15,'main'),(16,'one_trick'),(20,'one_trick')]:
+            with self.subTest(count=count):
+                games=[match(f'h{i}',(i+1)*2_000_000) for i in range(20)]
+                for i,g in enumerate(games):
+                    g['info']['participants'][0]['championName']='Ahri' if i<count else 'Other'+str(i%4)
+                # The anchor's champion is not included in the prior window.
+                games.append(match('anchor',100_000_000))
+                result=summarize_history(games,'p0',100_000_000,champion='Ahri')
+                self.assertEqual(result['championHabit'],expected)
+                self.assertEqual(result['championGames'],count)
+                self.assertEqual(sum(result['championCounts'].values()),20)
+                self.assertEqual(summarize_history(games,'p0',100_000_000,champion='Ahri',missing=1)['championHabit'],'unknown')
+        self.assertEqual(summarize_history([],'p0',100_000_000,champion='Ahri')['championHabit'],'unknown')
+
+    def test_main_champion_must_be_most_played_with_ties_allowed(self):
+        games=[match(f'h{i}',(i+1)*2_000_000) for i in range(20)]
+        for i,g in enumerate(games):
+            g['info']['participants'][0]['championName']='Ahri' if i<6 else 'Jinx' if i<12 else 'Other'+str(i)
+        self.assertEqual(summarize_history(games,'p0',100_000_000,champion='Ahri')['championHabit'],'main')
+        games[-1]['info']['participants'][0]['championName']='Jinx'
+        self.assertEqual(summarize_history(games,'p0',100_000_000,champion='Ahri')['championHabit'],'flex')
+        games[-1]['info']['participants'][0].pop('championName')
+        self.assertEqual(summarize_history(games,'p0',100_000_000,champion='Ahri')['championHabit'],'unknown')
+
     def test_main_roles_ties_support_and_off_role(self):
         games = [match(f'h{i}', (i+1)*2_000_000) for i in range(20)]
         for i,g in enumerate(games):
@@ -166,6 +191,7 @@ class StoreTests(unittest.TestCase):
     def test_four_teammates_against_five_opponents_excludes_self(self):
         cutoff = 100_000_000
         anchor = match('anchor', cutoff, wins=range(5))
+        anchor['info']['participants'][0].update(championId=103,profileIcon=7128)
         self.store.put_match(anchor)
         self.store.put_setting('anchors', ['anchor'])
         self.collector.account = {'puuid': 'p0'}
@@ -180,6 +206,7 @@ class StoreTests(unittest.TestCase):
             self.store.put_window(f'p{i}', cutoff, {'ids': ids, 'missing': 0, 'complete': True})
         view = self.collector.view()['matches'][0]
         self.assertEqual((view['allyMean'], view['enemyMean'], view['gap']), (50, 25, 25))
+        self.assertEqual((view['participants'][0]['championId'],view['participants'][0]['profileIconId']),(103,7128))
         self.store.put_window('p9', cutoff, {'ids': ids[:19], 'missing': 0, 'complete': False})
         view = self.collector.view()['matches'][0]
         self.assertFalse(view['complete'])
