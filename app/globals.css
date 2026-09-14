@@ -88,3 +88,6 @@ a{text-decoration:none;color:inherit}button,a,input{touch-action:manipulation}bu
 @media(max-width:760px){.topbar-actions{gap:10px}.topbar .local-badge{max-width:118px;font-size:10px;gap:6px}.local-badge>span{flex-shrink:0}.settings-body{padding:0 20px 24px}}
 
 .stats-grid .rank-value{font-size:24px;letter-spacing:-.4px;line-height:1.4}.stats-grid .stat-note{font-size:11px;color:#8fa5bc;margin-top:5px}
+
+.rank-stat-value{display:flex;align-items:center;gap:10px;min-height:64px}.rank-emblem{width:64px;height:64px;object-fit:contain;flex-shrink:0}.stats-grid .rank-stat-value .rank-value{font-size:21px;line-height:1.25;min-width:0}.stats-grid .rank-value small{display:block;font-size:13px;margin-top:5px;letter-spacing:0}.stats-grid .stat-value{display:flex;align-items:center;gap:5px;min-height:64px}
+@media(max-width:460px){.rank-stat-value{gap:6px}.rank-emblem{width:48px;height:48px}.stats-grid .rank-stat-value .rank-value{font-size:17px}}
