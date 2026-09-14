@@ -56,7 +56,7 @@ export default function Home() {
       const value=await response.json() as {error?:string};
       if(!response.ok)throw new Error(value.error||'The request failed.');
       await load();
-    }catch(e){setError(e instanceof Error?e.message:'Cannot reach the local collector.');throw e;}
+    }catch(e){setError(e instanceof Error?e.message:'Cannot reach the collector.');throw e;}
     finally{setPending(false);}
   },[load]);
   useEffect(()=>{
@@ -65,7 +65,7 @@ export default function Home() {
     const lifecycle=new AbortController();
     const tools=[
       {name:'read_queue_lab_status',description:'Read current import progress and saved matchmaking comparisons. Does not reveal the Riot key.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute:async(input:unknown)=>{if(!input||typeof input!=='object'||Object.keys(input).length)throw new Error('Expected an empty object.');const {csrf,...value}=await load();void csrf;return value;}},
-      {name:'refresh_queue_lab_profile',description:'Start or resume the local Riot import for the selected profile using the key already entered by the user. Retrieves new matches and rank snapshots.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:true},execute:async(input:unknown)=>{if(!input||typeof input!=='object'||Object.keys(input).length)throw new Error('Expected an empty object.');await action('/api/import');return {started:true};}},
+      {name:'refresh_queue_lab_profile',description:'Start or resume the Riot import for the selected profile using the key already entered by the user. Retrieves new matches and rank snapshots.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:true},execute:async(input:unknown)=>{if(!input||typeof input!=='object'||Object.keys(input).length)throw new Error('Expected an empty object.');await action('/api/import');return {started:true};}},
     ];
     for(const tool of tools){try{void Promise.resolve(context.registerTool(tool,{signal:lifecycle.signal})).catch(()=>{});}catch{}}
     return()=>lifecycle.abort();
@@ -94,11 +94,11 @@ export default function Home() {
     try{const response=await fetch('/api/export');if(!response.ok)throw new Error('Export failed.');const value=await response.json();const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='queue-context-observations.json';a.click();URL.revokeObjectURL(url);}catch{setError('Could not export observations. Check the collector and retry.');}finally{setExporting(false);}
   };
   return <div className="shell">
-    <header className="topbar"><a className="wordmark" href="/"><Activity size={23} /> QUEUE CONTEXT</a><div className="topbar-actions"><span className="local-badge"><span className={online?'':'offline'}/>{online?'Local collector connected':'Local collector offline'}</span>
+    <header className="topbar"><a className="wordmark" href="/"><Activity size={23} /> QUEUE CONTEXT</a><div className="topbar-actions"><span className="local-badge"><span className={online?'':'offline'}/>{online?'Collector connected':'Collector offline'}</span>
       <Sheet open={settingsOpen} onOpenChange={changeSettingsOpen}>
         <SheetTrigger render={<Button variant="ghost" size="icon" aria-label="Settings" title="Settings"/>}><Settings size={20}/></SheetTrigger>
         <SheetContent className="settings-panel">
-          <SheetHeader><SheetTitle><Settings size={20}/>Settings</SheetTitle><SheetDescription>Manage your Riot API connections on this computer.</SheetDescription></SheetHeader>
+          <SheetHeader><SheetTitle><Settings size={20}/>Settings</SheetTitle><SheetDescription>Manage your Riot API connections for this session.</SheetDescription></SheetHeader>
           <div className="settings-body">
             <div className="settings-section-title"><KeyRound size={18}/><h3>Riot API keys</h3><span>{usableKeys} available</span></div>
             <p className="settings-help">Requests are shared across your approved keys. Each key has its own limits; shared Riot limits pause all keys.</p>
@@ -128,7 +128,7 @@ export default function Home() {
         <div title="Average of all 10 players per match, including you, across the displayed games. Repeat players count once per match. Missing and unranked players are excluded. Uses latest observed ranks, not historical match ranks; 100 LP per division with a shared Master+ LP scale."><p>Lobby average rank</p><RankStat label={stats.lobbyRank}/><span>{stats.games?`Across ${stats.games} games · ${stats.rankedPlayers}/${stats.playerCount} ranks`:'No lobby ranks yet'}</span><span className="stat-note">Latest observed ranks</span></div>
         <div><p>Team history difference</p><strong className="stat-value">{stats.historyDifference===null?'—':`${stats.historyDifference>0?'+':''}${stats.historyDifference.toFixed(1)}`} <small>{stats.historyDifference===null?'':'pp'}</small></strong><span>Teammates minus opponents</span><span className="stat-note">{stats.comparisonCount}/{stats.games} complete comparisons</span></div>
       </section>
-      {!online&&<div className="notice"><AlertCircle size={18}/><div>The collector is not responding. Start Queue Context’s local launcher; the page will reconnect automatically.</div></div>}
+      {!online&&<div className="notice"><AlertCircle size={18}/><div>The collector is not responding. Check that Queue Context is running; the page will reconnect automatically.</div></div>}
       {error&&<div className="notice error" role="alert"><AlertCircle size={18}/>{error}</div>}
       {data?.job.status==='error'&&<div className="notice error" role="alert"><AlertCircle size={18}/><div><strong>Import stopped.</strong> {data.job.message}</div></div>}
       {data&&data.job.status!=='idle'&&<section className="job" aria-live="polite"><div className="job-copy">{running?<RefreshCw size={19} className="spin"/>:data.job.status==='complete'?<Check size={19}/>:<Database size={19}/>}<div><strong>{data.job.message}</strong><p>{data.cachedMatches.toLocaleString()} saved matches · {data.job.requests.toLocaleString()} requests this run{usableKeys?` · ${usableKeys} available ${usableKeys===1?'key':'keys'}`:''}{data.job.finishedAt&&data.job.status==='complete'?` · ${date(data.job.finishedAt)}`:''}</p></div></div><div className="job-actions">{running?<Button variant="outline" disabled={pending||data.job.status==='pausing'} onClick={()=>handleAction('/api/pause')}><Pause/>Pause</Button>:null}</div>{!!data.job.warning&&<p className="warning">{data.job.warning}</p>}{!!data.job.anchorGaps&&<p className="warning">{data.job.anchorGaps} recent match records were unavailable. This sample may have gaps.</p>}</section>}

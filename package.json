@@ -8,9 +8,10 @@
   "scripts": {
     "dev": "node scripts/dev-local.mjs",
     "dev:web": "vinext dev --hostname 127.0.0.1 --port 5173",
-    "build": "vinext build",
-    "start": "node scripts/dev-local.mjs",
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/start-production.mjs",
     "test": "node scripts/test.mjs",
+    "test:production": "node --test tests/production.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint",
     "format": "oxfmt"
@@ -54,5 +55,6 @@
     "vite": "8.0.13",
     "wrangler": "4.92.0"
   },
-  "type": "module"
+  "type": "module",
+  "packageManager": "pnpm@10.32.1"
 }

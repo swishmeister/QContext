@@ -35,6 +35,13 @@ const localBindingConfig = {
 };
 
 export default defineConfig(async () => {
+  // Render runs the built app in Node; keep Cloudflare tooling for local previews.
+  if (process.env.QUEUE_CONTEXT_BUILD_TARGET === 'node') {
+    return {
+      css: { postcss: { plugins: [tailwindcss()] } },
+      plugins: [vinext()],
+    };
+  }
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= 'false';

@@ -1,4 +1,4 @@
-"""Local-only Riot collector. Python 3.11+, no third-party dependencies."""
+"""Loopback Riot collector. Hosted access goes through the authenticated gateway."""
 from __future__ import annotations
 
 import hashlib
@@ -829,8 +829,9 @@ class Collector:
                                  'limits':'Descriptive pilot; no MMR estimate, smurf classification, win prediction, or causal conclusion.'})
 
 
-def handler_class(collector):
+def handler_class(collector, *, port=8766, public_origin=None):
     csrf = secrets.token_urlsafe(32)
+    origins = {public_origin} if public_origin else {'http://127.0.0.1:5173','http://localhost:5173'}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -849,11 +850,15 @@ def handler_class(collector):
         def allowed(self):
             host = self.headers.get('Host','')
             origin = self.headers.get('Origin')
-            return host in ('127.0.0.1:8766','localhost:8766') and (not origin or origin in ('http://127.0.0.1:5173','http://localhost:5173'))
+            return host in (f'127.0.0.1:{port}',f'localhost:{port}') and (not origin or origin in origins)
 
         def do_GET(self):
             if not self.allowed():
                 return self.send(403,{'error':'Local access only.'})
+            if self.path == '/api/health':
+                with collector.store.connect() as db:
+                    db.execute('SELECT 1')
+                return self.send(200,{'ok':True})
             if self.path == '/api/status':
                 return self.send(200,dict(collector.view(),csrf=csrf))
             if self.path == '/api/export':
@@ -864,7 +869,7 @@ def handler_class(collector):
 
         def do_POST(self):
             if not self.allowed() or not secrets.compare_digest(self.headers.get('X-Queue-Lab-Token',''),csrf):
-                return self.send(403,{'error':'Refresh the local dashboard before making changes.'})
+                return self.send(403,{'error':'Refresh the dashboard before making changes.'})
             try:
                 length = int(self.headers.get('Content-Length','0'))
                 if not 0 <= length <= 4096 or self.headers.get('Content-Type','').split(';')[0] != 'application/json':
@@ -895,10 +900,11 @@ def handler_class(collector):
 
 if __name__ == '__main__':
     os.umask(0o077)
-    store = Store(ROOT/'data'/'queue-lab.sqlite3')
+    store = Store(Path(os.environ.get('QUEUE_CONTEXT_DATA_DIR',str(ROOT/'data')))/'queue-lab.sqlite3')
     collector = Collector(store)
-    server = ThreadingHTTPServer(('127.0.0.1',8766),handler_class(collector))
-    print('Queue Context collector listening on http://127.0.0.1:8766',flush=True)
+    port = int(os.environ.get('QUEUE_CONTEXT_COLLECTOR_PORT','8766'))
+    server = ThreadingHTTPServer(('127.0.0.1',port),handler_class(collector,port=port,public_origin=os.environ.get('QUEUE_CONTEXT_PUBLIC_URL')))
+    print(f'Queue Context collector listening on http://127.0.0.1:{port}',flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

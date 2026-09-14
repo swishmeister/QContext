@@ -1,6 +1,6 @@
 # Queue Context
 
-A local League of Legends research pilot for **North American accounts**, starting with Llewellyn#300. Use the profile search to import another full Riot ID (Name#Tag). It compares the recent histories of your teammates and opponents across your latest 20 completed Ranked Solo/Duo games.
+A League of Legends research pilot for **North American accounts**, starting with Llewellyn#300. Run it locally or as a password-protected Render workspace. Use the profile search to import another full Riot ID (Name#Tag). It compares the recent histories of your teammates and opponents across your latest 20 completed Ranked Solo/Duo games.
 
 The first version is an exploratory dashboard, not a test that proves or disproves “losers queue.” Riot's internal MMR and matchmaking intent are not observable through this tool.
 
@@ -13,7 +13,11 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open **http://127.0.0.1:5173**. Keep the launcher running; Ctrl+C stops both services. The dashboard uses port 5173 and the collector uses port 8766, both on loopback. This app currently runs through its local development server; the build is a compilation check, not a standalone hosted application.
+Open **http://127.0.0.1:5173**. Keep the launcher running; Ctrl+C stops both services. The development dashboard uses port 5173 and the collector uses port 8766, both on loopback.
+
+## Host on Render
+
+The repository includes a production Dockerfile, a Render Blueprint and a password-protected gateway. See [the deployment guide](docs/render-deployment.md) for setup, required settings, costs and data persistence. Hosting uses a paid web service with a persistent disk. It is one shared research workspace, with no separate user accounts. `pnpm build` creates the production build; `pnpm start` runs it with the required hosting settings.
 
 Get a development key from the [Riot Developer Portal](https://developer.riotgames.com/), then open the **cog in the top right → Settings** and enter it in a masked API key field. Do not paste it into chat or commit it. The key stays in collector memory and must be entered again after a restart. Development keys expire after 24 hours.
 
@@ -42,7 +46,7 @@ The cards below the account show current rank, win rate over the displayed last 
 - Your latest 20 available ranked Solo/Duo matches, excluding games shorter than three minutes as a remake approximation.
 - For every participant, up to 20 eligible matches **completed before the shared match began**. Your own history is shown but excluded from teammate averages.
 - Summoner icons from the shared match record and champion portraits mapped by champion ID to Riot Data Dragon 16.18.1 (catalogue in `lib/champion-icons.json`). Missing icons fall back to initials.
-- Champion habits use complete prior 20-game windows: **One-trick pattern** = 16+ games; **Main pick** = most-played champion (ties allowed) with 6+ games; **Flex pick** = 1+ games otherwise; **First in 20** = zero games. Incomplete histories are unclassified. These are descriptive tags for the window, not lifetime mastery, proof of a one-trick account, or proof the player has never used the champion.
+- Champion habits use complete prior 20-game windows: **OTP** = 16+ games; **Main** = most-played champion (ties allowed) with 6+ games; **Flex** = 1+ games otherwise; **First in 20** = zero games. Incomplete histories are unclassified. These are descriptive tags for the window, not lifetime mastery, proof of a one-trick account, or proof the player has never used the champion.
 - Prior win rate, win/loss streak, champion/role familiarity, most-played role(s), and main-role/off-role tags. Ties share main-role status; missing histories are labeled. Support is displayed as Support.
 - Team averages of observed rank include all five players, excluding missing/unranked records and showing coverage. Ranks are placed on a display scale with 100 LP per division, averaged, and rounded to the nearest LP. Apex tiers share a Master+ LP scale; this is not internal MMR or an official team rank.
 - Summoner icons from Riot Data Dragon (asset version 16.18.1), using the selected summoner profile or latest cached match as a fallback.
@@ -63,7 +67,7 @@ History queries inspect at most 400 prior IDs per participant per anchor. The an
 
 SQLite data is stored in `data/queue-lab.sqlite3`, ignored by Git. It contains player identifiers and match records, so treat it as personal research data. **Export observations** downloads JSON with the visible comparisons and supporting history IDs. It does not include the API key or the complete raw match cache. The database retains all rank observations; the dashboard/export show the latest observation per player.
 
-Keys are neither persisted nor returned by the API. Settings shows only generated labels, opaque removal IDs, status and session request counts; exports omit these settings as well. The collector validates local host/origin and a per-process request token for changes. It is intended for one trusted user on one computer, not remote or multi-user access. Browser extensions, local programs, and developer tools with access to your session may still see information you enter.
+Keys are neither persisted nor returned by the API. Settings shows only generated labels, opaque removal IDs, status and session request counts; exports omit these settings as well. The collector stays on loopback and checks host/origin and a per-process request token for changes. Hosted access passes through a gateway that requires a password, validates the public origin and strips login credentials before forwarding requests. The public health check returns readiness only. Browser extensions, local programs, and developer tools with access to your session may still see information you enter.
 
 ## Development
 
@@ -71,12 +75,13 @@ Keys are neither persisted nor returned by the API. Settings shows only generate
 pnpm test
 pnpm typecheck
 pnpm build
+pnpm test:production
 ```
 
 `app/` contains the React dashboard, `collector/server.py` contains the Riot client, import job, SQLite store and local API, and `tests/` contains synthetic offline tests. Tests do not contact Riot or use real account records. The original account import has been verified with real data. Profile switching and the new summoner lookup are covered by offline fixtures; a live profile search requires reconnecting your key after this update. Profile changes preserve earlier profiles’ anchor lists and share the match cache.
 
 Riot endpoints used: account-v1 by Riot ID and match-v5 on `americas`, and league-v4 entries and summoner-v4 by PUUID on `na1`. See the [official API reference](https://developer.riotgames.com/apis) and [rate-limit documentation](https://developer.riotgames.com/docs/portal). The collector spaces requests conservatively per key and routing host, observes application/method limits and server counts, and handles HTTP 429 `Retry-After` responses.
 
-This repository is local, on branch `main`, with no remote configured.
+Source repository: [swishmeister/QContext](https://github.com/swishmeister/QContext).
 
 Queue Context is not endorsed by Riot Games and does not reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games and all associated properties are trademarks or registered trademarks of Riot Games, Inc.
