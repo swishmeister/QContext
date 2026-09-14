@@ -154,8 +154,8 @@ function RankStat({label}:{label:string|null}) {
   </div>;
 }
 
-const championHabitLabels={unknown:'History pending',first_in_20:'First in 20',one_trick:'OTP',main:'Main pick',flex:'Flex pick'};
-const championHabitRules='Based only on the 20 ranked games before this match: OTP (one-trick) = 16+ games on this champion; main pick = most-played (ties allowed) with 6+ games; flex pick = 1+ games otherwise; first in 20 = 0 games. Incomplete histories are not classified. These are sample-based habits, not lifetime mastery.';
+const championHabitLabels={unknown:'History pending',first_in_20:'First in 20',one_trick:'OTP',main:'Main',flex:'Flex'};
+const championHabitRules='Based only on the 20 ranked games before this match: OTP (one-trick) = 16+ games on this champion; Main = most-played (ties allowed) with 6+ games; Flex = 1+ games otherwise; first in 20 = 0 games. Incomplete histories are not classified. These are sample-based habits, not lifetime mastery.';
 
 function GameIcon({src,alt,className,fallback}:{src?:string;alt:string;className:string;fallback:string}) {
   const [failed,setFailed]=useState(false);
