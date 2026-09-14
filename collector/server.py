@@ -189,7 +189,12 @@ class RiotClient:
             if self.stop.is_set():
                 raise Paused()
             self.limiter.wait(host, method, self.stop)
-            req = urllib.request.Request(url, headers={'X-Riot-Token':self.key,'Accept':'application/json'})
+            # Identify the app: the default Python client identity can be rejected
+            # by the edge before the request reaches Riot's API authentication.
+            req = urllib.request.Request(url, headers={
+                'X-Riot-Token': self.key, 'Accept': 'application/json',
+                'User-Agent': 'QueueLab/0.1 (local personal research)',
+            })
             self.calls += 1
             self.update(requests=self.calls)
             try:
@@ -201,6 +206,8 @@ class RiotClient:
                 if e.code == 404:
                     return None
                 if e.code in (401,403):
+                    if 'application/json' not in e.headers.get('Content-Type','').lower():
+                        raise RiotError('The connection was blocked before Riot could validate the key. Your key may still be valid; retry the import after checking the connection.') from None
                     raise RiotError('Riot rejected the key or this API access. Enter a valid development/personal key from the Riot Developer Portal.', e.code) from None
                 if e.code == 429:
                     try:

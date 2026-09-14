@@ -1,4 +1,5 @@
 import json
+import io
 import tempfile
 import threading
 import unittest
@@ -8,7 +9,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from collector.server import Collector, Paused, RateLimiter, Store, handler_class, summarize_history
+from collector.server import Collector, Paused, RateLimiter, RiotClient, RiotError, Store, handler_class, summarize_history
 
 
 def match(mid, start, wins=(), duration=1800, queue=420):
@@ -168,6 +169,29 @@ class RateTests(unittest.TestCase):
             with self.assertRaises(Paused):
                 limiter.wait('americas', 'match', stop)
         self.assertEqual(len(limiter.events[('americas', 'app')]), 1)
+
+
+class RiotClientTests(unittest.TestCase):
+    def test_requests_identify_queue_lab(self):
+        client = RiotClient('synthetic-test-key', threading.Event(), lambda **_: None)
+        response = io.BytesIO(b'{"puuid":"synthetic-player"}')
+        response.headers = {'Content-Type': 'application/json'}
+        with patch('collector.server.urllib.request.urlopen', return_value=response) as request:
+            self.assertEqual(client.get('americas', '/test', 'account')['puuid'], 'synthetic-player')
+        headers = {k.lower(): v for k, v in request.call_args.args[0].header_items()}
+        self.assertEqual(headers['user-agent'], 'QueueLab/0.1 (local personal research)')
+        self.assertEqual(headers['x-riot-token'], 'synthetic-test-key')
+
+    def test_edge_block_is_distinguished_from_api_key_rejection(self):
+        for content_type, expected_status in [('text/plain', 0), ('application/json;charset=utf-8', 403)]:
+            with self.subTest(content_type=content_type):
+                client = RiotClient('synthetic-test-key', threading.Event(), lambda **_: None)
+                error = urllib.error.HTTPError('https://americas.api.riotgames.com/test', 403, 'Forbidden', {'Content-Type': content_type}, io.BytesIO(b'not logged'))
+                with patch('collector.server.urllib.request.urlopen', side_effect=error):
+                    with self.assertRaises(RiotError) as caught:
+                        client.get('americas', '/test', 'account')
+                self.assertEqual(caught.exception.status, expected_status)
+                self.assertNotIn('synthetic-test-key', str(caught.exception))
 
 
 if __name__ == '__main__':
