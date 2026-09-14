@@ -15,9 +15,23 @@ pnpm dev
 
 Open **http://127.0.0.1:5173**. Keep the launcher running; Ctrl+C stops both services. The dashboard uses port 5173 and the collector uses port 8766, both on loopback. This app currently runs through its local development server; the build is a compilation check, not a standalone hosted application.
 
-Get a development key from the [Riot Developer Portal](https://developer.riotgames.com/), then enter it into the dashboard's password field. Do not paste it into chat or commit it. The key stays in collector memory and must be entered again after a restart. Development keys expire after 24 hours.
+Get a development key from the [Riot Developer Portal](https://developer.riotgames.com/), then open the **cog in the top right → Settings** and enter it in a masked API key field. Do not paste it into chat or commit it. The key stays in collector memory and must be entered again after a restart. Development keys expire after 24 hours.
 
-Choose **Connect & import 20 matches**. A cold import can take roughly 60–90 minutes under personal-key limits, depending on match overlap, API availability, and retries. Comparisons appear as histories finish. Pause and resume are supported; individual match records are saved immediately so they do not need to be downloaded again. Refreshing after new games reuses cached matches and records current ranks for newly encountered rosters and the latest roster.
+Choose **Add keys**, close Settings, then **Refresh profile** (or search a Riot ID). Adding keys does not start network collection. A cold import with one key can take roughly 60–90 minutes under personal-key limits, depending on match overlap, API availability, and retries. Comparisons appear as histories finish. Pause and resume are supported; individual match records are saved immediately so they do not need to be downloaded again. Refreshing after new games reuses cached matches and records current ranks for newly encountered rosters and the latest roster.
+
+## Multiple approved keys
+
+This build supports up to 10 keys for the user’s Riot-approved multi-key setup. Riot’s standard [policy prohibits multiple applications to bypass limits](https://developer.riotgames.com/docs/faqs); use pooling only within the approval granted for this product.
+
+In Settings, select **Add another key** for more fields, then **Add keys**. You can add more later without re-entering existing keys. Identical keys count once. Pause the import before adding/removing keys; remove expired keys with their trash button. All credentials disappear on restart, while collected matches remain saved.
+
+The single import dispatcher chooses the next key with available budget rather than waiting on one exhausted key. It keeps one shared match cache and chronological history pipeline, without concurrent duplicate downloads. Each key is paced at least 1.3 seconds apart per routing host, with additional waits for Riot’s application/method limits. Multiple keys reduce these pacing waits, but network latency and shared service limits still constrain throughput; speed does not necessarily scale linearly.
+
+Application/method 429 responses cool down that key at the corresponding scope. Service or unspecified 429 responses cool down **every** key on that routing host. Expired/unknown keys are excluded while other keys continue; endpoint-specific access failures leave other endpoints available. Labels and session request totals are visible in Settings. Limits survive pause/resume and removing/re-adding the same key during the same process.
+
+Riot player identifiers can differ between applications. Before importing, every key must return the same player identifier for a reference profile, matched against the saved cache. Incompatible keys are excluded so their match records cannot contaminate existing comparisons. Switching to keys with a different identifier namespace is not supported for the existing cache. If the reference Riot ID is renamed, the identity check will stop with an explanatory message rather than assume compatibility.
+
+Multi-key behavior is verified with synthetic responses and a simulated clock, including shared cooldowns, rejection/failover, identifier compatibility, duplicate keys, pause behavior, and secret-free exports. Actual throughput still needs to be measured using the approved keys entered locally.
 
 ## What it collects
 
@@ -42,7 +56,7 @@ History queries inspect at most 400 prior IDs per participant per anchor. The an
 
 SQLite data is stored in `data/queue-lab.sqlite3`, ignored by Git. It contains player identifiers and match records, so treat it as personal research data. **Export observations** downloads JSON with the visible comparisons and supporting history IDs. It does not include the API key or the complete raw match cache. The database retains all rank observations; the dashboard/export show the latest observation per player.
 
-The key is neither persisted nor returned by the API. The collector validates local host/origin and a per-process request token for changes. It is intended for one trusted user on one computer, not remote or multi-user access. Browser extensions, local programs, and developer tools with access to your session may still see information you enter.
+Keys are neither persisted nor returned by the API. Settings shows only generated labels, opaque removal IDs, status and session request counts; exports omit these settings as well. The collector validates local host/origin and a per-process request token for changes. It is intended for one trusted user on one computer, not remote or multi-user access. Browser extensions, local programs, and developer tools with access to your session may still see information you enter.
 
 ## Development
 
@@ -54,7 +68,7 @@ pnpm build
 
 `app/` contains the React dashboard, `collector/server.py` contains the Riot client, import job, SQLite store and local API, and `tests/` contains synthetic offline tests. Tests do not contact Riot or use real account records. The original account import has been verified with real data. Profile switching and the new summoner lookup are covered by offline fixtures; a live profile search requires reconnecting your key after this update. Profile changes preserve earlier profiles’ anchor lists and share the match cache.
 
-Riot endpoints used: account-v1 by Riot ID and match-v5 on `americas`, and league-v4 entries and summoner-v4 by PUUID on `na1`. See the [official API reference](https://developer.riotgames.com/apis) and [rate-limit documentation](https://developer.riotgames.com/docs/portal). The collector spaces requests conservatively, observes application/method limits, and handles HTTP 429 `Retry-After` responses.
+Riot endpoints used: account-v1 by Riot ID and match-v5 on `americas`, and league-v4 entries and summoner-v4 by PUUID on `na1`. See the [official API reference](https://developer.riotgames.com/apis) and [rate-limit documentation](https://developer.riotgames.com/docs/portal). The collector spaces requests conservatively per key and routing host, observes application/method limits and server counts, and handles HTTP 429 `Retry-After` responses.
 
 This repository is local, on branch `main`, with no remote configured.
 

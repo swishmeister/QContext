@@ -1,9 +1,10 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useState } from 'react';
-import { Activity, ArrowDownToLine, ArrowRight, Database, KeyRound, Pause, RefreshCw, ShieldCheck, ChevronDown, Check, AlertCircle, Search } from 'lucide-react';
+import { Activity, ArrowDownToLine, ArrowRight, Database, KeyRound, Pause, RefreshCw, ShieldCheck, ChevronDown, Check, AlertCircle, Search, Settings, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Sheet, SheetTrigger, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 
 type History = { n:number; wins:number; losses:number; winRate:number|null; complete:boolean; missing:number; championGames:number; roleGames:number|null; streak:number; matchIds:string[]; mainRoles?:string[]; mainRoleGames?:number; roleStatus?:string; roleCounts?:Record<string,number> };
@@ -12,7 +13,8 @@ type DuoPair = {players:string[];status:'duo'|'not_duo'|'possible';source:'manua
 type RankAverage = {label:string|null;count:number;total:number;oldestObservation:number|null;newestObservation:number|null};
 type Match = { id:string; startedAt:number; duration:number; win:boolean; champion:string; team:number; participants:Player[]; complete:boolean; allyMean:number|null; enemyMean:number|null; gap:number|null; historiesReady:number; duoPairs?:DuoPair[]; teamRanks?:{allies:RankAverage;enemies:RankAverage} };
 type Profile = {name:string;tag:string;platform:string;puuid?:string;iconUrl?:string|null;level?:number|null};
-type Status = { csrf:string; account:Profile; connected:boolean; snapshotCount:number; cachedMatches:number; matches:Match[]; job:{status:string;message:string;done:number;total:number;requests:number;finishedAt?:number;warning?:string;anchorGaps?:number} };
+type ApiKeyStatus = {id:string;label:string;requests:number;status:'ready'|'unverified'|'limited'|'rejected'|'incompatible';reason:string|null};
+type Status = { apiKeys?:ApiKeyStatus[];csrf:string; account:Profile; connected:boolean; snapshotCount:number; cachedMatches:number; matches:Match[]; job:{status:string;message:string;done:number;total:number;requests:number;finishedAt?:number;warning?:string;anchorGaps?:number} };
 type ModelContext = {registerTool:(tool:{name:string;description:string;inputSchema:object;annotations:object;execute:(input:unknown)=>Promise<unknown>},options:{signal:AbortSignal})=>void|Promise<void>};
 const date = (ms:number) => new Date(ms).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
 const number = (n:number|null, suffix='') => n===null?'—':`${n.toFixed(1)}${suffix}`;
@@ -20,12 +22,13 @@ const roleName = (role:string) => ({TOP:'Top',JUNGLE:'Jungle',MIDDLE:'Mid',BOTTO
 
 export default function Home() {
   const [data,setData] = useState<Status|null>(null);
-  const [key,setKey] = useState('');
+  const [keyDrafts,setKeyDrafts] = useState(['']);
+  const [settingsOpen,setSettingsOpen] = useState(false);
+  const [settingsMessage,setSettingsMessage] = useState('');
   const [error,setError] = useState('');
   const [online,setOnline] = useState(false);
   const [pending,setPending] = useState(false);
   const [selected,setSelected] = useState<string|null>(null);
-  const [showKey,setShowKey] = useState(false);
   const [exporting,setExporting] = useState(false);
   const [search,setSearch] = useState('Llewellyn#300');
   const profile=data?.account??{name:'Llewellyn',tag:'300',platform:'NA'};
@@ -50,7 +53,7 @@ export default function Home() {
       const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Queue-Lab-Token':current.csrf},body:JSON.stringify(body)});
       const value=await response.json() as {error?:string};
       if(!response.ok)throw new Error(value.error||'The request failed.');
-      if(path==='/api/import'){setKey('');setShowKey(false);}await load();
+      await load();
     }catch(e){setError(e instanceof Error?e.message:'Cannot reach the local collector.');throw e;}
     finally{setPending(false);}
   },[load]);
@@ -71,24 +74,60 @@ export default function Home() {
   const wins=matches.filter(m=>m.win).length;
   const running=data?.job.status==='running'||data?.job.status==='pausing';
   const active=matches.find(m=>m.id===selected)??null;
-  const connect=!data?.connected||showKey;
+  const configuredKeys=data?.apiKeys??[];
+  const usableKeys=configuredKeys.filter(k=>k.status!=='rejected'&&k.status!=='incompatible').length;
   const handleAction=(path:string,body:object={})=>{void action(path,body).catch(()=>{});};
+  const openSettings=()=>{setSettingsMessage('');setSettingsOpen(true);};
+  const changeSettingsOpen=(open:boolean)=>{setSettingsOpen(open);if(!open){setKeyDrafts(['']);setSettingsMessage('');}};
+  const saveKeys=async()=>{
+    setSettingsMessage('');
+    try{await action('/api/keys',{keys:keyDrafts.map(k=>k.trim()).filter(Boolean)});setKeyDrafts(['']);setSettingsMessage('Keys added. Close Settings and refresh your profile to start the import.');}
+    catch(e){setSettingsMessage(e instanceof Error?e.message:'Could not add keys.');}
+  };
+  const removeKey=async(id:string)=>{
+    setSettingsMessage('');
+    try{await action('/api/keys',{removeId:id});setSettingsMessage('Key removed from this session.');}
+    catch(e){setSettingsMessage(e instanceof Error?e.message:'Could not remove the key.');}
+  };
   const exportData=async()=>{
     setExporting(true);setError('');
     try{const response=await fetch('/api/export');if(!response.ok)throw new Error('Export failed.');const value=await response.json();const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='queue-lab-observations.json';a.click();URL.revokeObjectURL(url);}catch{setError('Could not export observations. Check the collector and retry.');}finally{setExporting(false);}
   };
   return <div className="shell">
-    <header className="topbar"><a className="wordmark" href="/"><Activity size={23} /> QUEUE LAB</a><span className="local-badge"><span className={online?'':'offline'}/>{online?'Local collector connected':'Local collector offline'}</span></header>
+    <header className="topbar"><a className="wordmark" href="/"><Activity size={23} /> QUEUE LAB</a><div className="topbar-actions"><span className="local-badge"><span className={online?'':'offline'}/>{online?'Local collector connected':'Local collector offline'}</span>
+      <Sheet open={settingsOpen} onOpenChange={changeSettingsOpen}>
+        <SheetTrigger render={<Button variant="ghost" size="icon" aria-label="Settings" title="Settings"/>}><Settings size={20}/></SheetTrigger>
+        <SheetContent className="settings-panel">
+          <SheetHeader><SheetTitle><Settings size={20}/>Settings</SheetTitle><SheetDescription>Manage your Riot API connections on this computer.</SheetDescription></SheetHeader>
+          <div className="settings-body">
+            <div className="settings-section-title"><KeyRound size={18}/><h3>Riot API keys</h3><span>{usableKeys} available</span></div>
+            <p className="settings-help">Requests are shared across your approved keys. Each key has its own limits; shared Riot limits pause all keys.</p>
+            {configuredKeys.length>0?<ul className="connected-keys">{configuredKeys.map(k=><li key={k.id}><div className="key-summary"><strong>{k.label}</strong><span className={`key-state ${k.status}`}>{k.status==='ready'?'Ready':k.status==='unverified'?'Not checked yet':k.status==='limited'?'Limited access':k.status==='incompatible'?'Incompatible':'Rejected'}</span><Button type="button" variant="ghost" size="icon-sm" aria-label={`Remove ${k.label}`} disabled={running||pending||!online} onClick={()=>void removeKey(k.id)}><Trash2 size={15}/></Button></div><p>{k.requests.toLocaleString()} requests this session</p>{k.reason&&<p className="key-reason">{k.reason}</p>}</li>)}</ul>:<div className="no-keys">No keys connected. Add a key to start importing.</div>}
+            {running&&<div className="settings-pause"><p>Pause the import before adding or removing keys.</p><Button variant="outline" disabled={pending||data?.job.status==='pausing'} onClick={()=>handleAction('/api/pause')}><Pause size={15}/>Pause import</Button></div>}
+            <form className="key-form" onSubmit={e=>{e.preventDefault();void saveKeys();}}>
+              <h4>Add API keys</h4>
+              {keyDrafts.map((value,index)=><div className="key-entry" key={index}><label htmlFor={`riot-key-${index}`}>API key {index+1}</label><div><Input id={`riot-key-${index}`} type="password" value={value} onChange={e=>setKeyDrafts(drafts=>drafts.map((old,i)=>i===index?e.target.value:old))} autoComplete="off" spellCheck={false} placeholder="RGAPI-…" disabled={running||pending} maxLength={106}/>{keyDrafts.length>1&&<Button type="button" size="icon" variant="ghost" aria-label={`Remove API key field ${index+1}`} disabled={pending||running} onClick={()=>setKeyDrafts(drafts=>drafts.filter((_,i)=>i!==index))}><Trash2 size={15}/></Button>}</div></div>)}
+              <Button type="button" variant="ghost" className="add-key-field" disabled={pending||running||keyDrafts.length>=10-configuredKeys.length} onClick={()=>setKeyDrafts(drafts=>[...drafts,''])}><Plus size={16}/>Add another key</Button>
+              <Button type="submit" className="save-keys" disabled={!online||pending||running||!keyDrafts.some(k=>k.trim())||configuredKeys.length>=10}>{pending?'Saving…':'Add keys'}</Button>
+              <p className="key-privacy"><ShieldCheck size={16}/>Keys stay in memory. They are never saved to disk or included in exports. Re-enter them after restarting Queue Lab.</p>
+              <p className="settings-help">Up to 10 keys. Duplicate keys count once. Development keys expire after 24 hours.</p>
+              <a href="https://developer.riotgames.com/" target="_blank" rel="noreferrer">Riot Developer Portal <ArrowRight size={14}/></a>
+              {settingsMessage&&<p className="settings-message" role="status">{settingsMessage}</p>}
+            </form>
+          </div>
+        </SheetContent>
+      </Sheet>
+    </div></header>
     <main className="workspace">
       <div className="page-heading"><div><p className="eyebrow">MATCHMAKING / PERSONAL PILOT</p><h1>Your matches, in context.</h1><p className="subtitle">Compare the histories players brought into each game.</p></div><span className="version">PILOT 01</span></div>
-      <form className="profile-search" onSubmit={e=>{e.preventDefault();if(!data?.connected){setShowKey(true);setError('Enter your Riot API key below to search this profile.');return;}setSelected(null);handleAction('/api/import',{riotId:search});}}><label htmlFor="profile-search">Summoner profile</label><div className="search-controls"><span className="region-label">NA</span><Input id="profile-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Game name#Tag" required maxLength={80} disabled={running||pending}/><Button type="submit" disabled={!online||pending||running||!search.trim()}><Search size={16}/>Search profile</Button></div><p>{running?'Pause the current import to search another profile.':'Enter a Riot ID, including the #tag. Saved matches are reused when you switch profiles.'}</p></form>
+      <form className="profile-search" onSubmit={e=>{e.preventDefault();if(!data?.connected){openSettings();setSettingsMessage('Add your Riot API keys, then search this profile again.');return;}setSelected(null);handleAction('/api/import',{riotId:search});}}><label htmlFor="profile-search">Summoner profile</label><div className="search-controls"><span className="region-label">NA</span><Input id="profile-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Game name#Tag" required maxLength={80} disabled={running||pending}/><Button type="submit" disabled={!online||pending||running||!search.trim()}><Search size={16}/>Search profile</Button></div><p>{running?'Pause the current import to search another profile.':'Enter a Riot ID, including the #tag. Saved matches are reused when you switch profiles.'}</p></form>
       <section className="account-strip"><ProfileIcon key={profile.iconUrl} profile={profile}/><div><h2>{profile.name}<span>#{profile.tag}</span></h2><p>North America <span className="dot">·</span> Ranked Solo / Duo{profile.level?` · Level ${profile.level}`:''}</p></div><Button className="refresh" disabled={!online||!data?.connected||pending||running} onClick={()=>handleAction('/api/import')}><RefreshCw size={16}/> {data?.job.status==='paused'?'Resume import':'Refresh profile'}</Button></section>
       <section className="stats-grid"><div><p>Matches in this pilot</p><strong>{matches.length} <small>/ 20</small></strong><span>{matches.length?`${wins} wins · ${matches.length-wins} losses`:'Completed ranked games'}</span></div><div><p>Histories processed</p><strong>{data?.job.done??0} <small>/ {data?.job.total||200}</small></strong><span>{complete.length} complete team comparisons</span></div><div><p>Team history difference</p><strong>{avg===null?'—':`${avg>0?'+':''}${avg.toFixed(1)}`} <small>{avg===null?'':'pp'}</small></strong><span>Teammates minus opponents</span></div><div><p>Rank snapshots</p><strong>{data?.snapshotCount??0}</strong><span>At observation time</span></div></section>
       {!online&&<div className="notice"><AlertCircle size={18}/><div>The collector is not responding. Start Queue Lab’s local launcher; the page will reconnect automatically.</div></div>}
       {error&&<div className="notice error" role="alert"><AlertCircle size={18}/>{error}</div>}
       {data?.job.status==='error'&&<div className="notice error" role="alert"><AlertCircle size={18}/><div><strong>Import stopped.</strong> {data.job.message}</div></div>}
-      {connect&&<section className="connect-panel"><div className="connect-copy"><div className="icon-disc"><KeyRound/></div><p className="eyebrow">CONNECT YOUR DATA</p><h2>Start with the games<br/>you’ve already played.</h2><p>A Riot development key retrieves your last 20 ranked games and each player’s 20 earlier games. First import: allow roughly 60–90 minutes; overlap can shorten it.</p><a href="https://developer.riotgames.com/" target="_blank" rel="noreferrer">Get a key from Riot <ArrowRight size={15}/></a></div><form className="connect-form" onSubmit={e=>{e.preventDefault();handleAction('/api/import',{key,riotId:search});}}><label htmlFor="riot-key">Riot API key</label><Input id="riot-key" type="password" value={key} onChange={e=>setKey(e.target.value)} autoComplete="off" placeholder="RGAPI-…" disabled={running||pending} required/><p><ShieldCheck size={15}/> Kept in memory on this computer. Never saved to disk.</p><Button type="submit" disabled={!online||pending||running||!key.trim()}>{pending?'Connecting…':matches.length?'Connect & resume import':'Connect & import 20 matches'}<ArrowRight/></Button><small>Development keys expire after 24 hours. Saved matches stay available.</small></form></section>}
-      {data&&data.job.status!=='idle'&&<section className="job" aria-live="polite"><div className="job-copy">{running?<RefreshCw size={19} className="spin"/>:data.job.status==='complete'?<Check size={19}/>:<Database size={19}/>}<div><strong>{data.job.message}</strong><p>{data.cachedMatches.toLocaleString()} saved matches · {data.job.requests.toLocaleString()} requests this run{data.job.finishedAt&&data.job.status==='complete'?` · ${date(data.job.finishedAt)}`:''}</p></div></div><div className="job-actions">{running?<Button variant="outline" disabled={pending||data.job.status==='pausing'} onClick={()=>handleAction('/api/pause')}><Pause/>Pause</Button>:data.connected&&<Button variant="ghost" onClick={()=>setShowKey(!showKey)}>Replace key</Button>}</div>{!!data.job.warning&&<p className="warning">{data.job.warning}</p>}{!!data.job.anchorGaps&&<p className="warning">{data.job.anchorGaps} recent match records were unavailable. This sample may have gaps.</p>}</section>}
+      {online&&!data?.connected&&<div className="connection-hint"><KeyRound size={17}/><span>Add Riot API keys in Settings to import your matches.</span><Button variant="outline" onClick={openSettings}>Open Settings</Button></div>}
+      {data&&data.job.status!=='idle'&&<section className="job" aria-live="polite"><div className="job-copy">{running?<RefreshCw size={19} className="spin"/>:data.job.status==='complete'?<Check size={19}/>:<Database size={19}/>}<div><strong>{data.job.message}</strong><p>{data.cachedMatches.toLocaleString()} saved matches · {data.job.requests.toLocaleString()} requests this run{usableKeys?` · ${usableKeys} available ${usableKeys===1?'key':'keys'}`:''}{data.job.finishedAt&&data.job.status==='complete'?` · ${date(data.job.finishedAt)}`:''}</p></div></div><div className="job-actions">{running?<Button variant="outline" disabled={pending||data.job.status==='pausing'} onClick={()=>handleAction('/api/pause')}><Pause/>Pause</Button>:null}</div>{!!data.job.warning&&<p className="warning">{data.job.warning}</p>}{!!data.job.anchorGaps&&<p className="warning">{data.job.anchorGaps} recent match records were unavailable. This sample may have gaps.</p>}</section>}
       <div className="section-heading"><div><p className="eyebrow">THE EVIDENCE</p><h2>Match history</h2></div><Button variant="outline" disabled={!matches.length||!online||exporting} onClick={()=>void exportData()}><ArrowDownToLine/>Export observations</Button></div>
       {!matches.length?<section className="empty"><Database size={26}/><h3>Your first comparison will appear here.</h3><p>Four teammates. Five opponents. Only the games they finished before yours.</p><div className="method-tags"><span>Same queue</span><span>Chronological histories</span><span>Missing data stays visible</span></div></section>:<section className="match-list"><Table><TableHeader><TableRow><TableHead>Match</TableHead><TableHead>Your champion</TableHead><TableHead>Teammates</TableHead><TableHead>Opponents</TableHead><TableHead>Difference</TableHead><TableHead>Coverage</TableHead><TableHead><span className="sr-only">Details</span></TableHead></TableRow></TableHeader><TableBody>{matches.map(m=><Fragment key={m.id}><TableRow data-state={active?.id===m.id?'selected':undefined}><TableCell><span className={`result ${m.win?'win':'loss'}`}>{m.win?'Win':'Loss'}</span><small className="match-date">{date(m.startedAt)}</small></TableCell><TableCell>{m.champion}<small className="match-date">{Math.floor(m.duration/60)}m {Math.floor(m.duration%60)}s</small></TableCell><TableCell>{number(m.allyMean,'%')}</TableCell><TableCell>{number(m.enemyMean,'%')}</TableCell><TableCell><span className={m.gap!==null&&m.gap<0?'negative':'positive'}>{m.gap===null?'—':`${m.gap>0?'+':''}${m.gap.toFixed(1)} pp`}</span></TableCell><TableCell><span className={`coverage ${m.complete?'ready':''}`}>{m.complete?'Complete':`${m.historiesReady}/10 processed`}</span></TableCell><TableCell><Button variant="ghost" size="sm" id={`match-toggle-${m.id}`} aria-controls={`match-details-${m.id}`} aria-expanded={active?.id===m.id} aria-label={`View ${m.champion} match from ${date(m.startedAt)}`} onClick={()=>setSelected(active?.id===m.id?null:m.id)}>Details<ChevronDown size={14} className={active?.id===m.id?'rotate-180':undefined}/></Button></TableCell></TableRow>
         {active?.id===m.id&&<TableRow className="match-details-row"><TableCell colSpan={7} className="match-details-cell">

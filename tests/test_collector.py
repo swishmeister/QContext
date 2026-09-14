@@ -9,7 +9,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from collector.server import Collector, Paused, RateLimiter, RiotClient, RiotError, Store, average_rank, duo_pairs, handler_class, parse_riot_id, summarize_history
+from collector.server import Collector, KeyPool, Paused, RateLimiter, RiotClient, RiotError, Store, average_rank, duo_pairs, handler_class, parse_riot_id, retry_after, summarize_history
 
 
 def match(mid, start, wins=(), duration=1800, queue=420):
@@ -87,10 +87,13 @@ class StoreTests(unittest.TestCase):
         self.store.put_setting('anchors',['saved-first-match'])
 
         class FakeAPI:
+            def resolve_account(inner,path,expected=None,verified_only=False):
+                if expected=='p0':
+                    return first
+                self.assertTrue(path.endswith('/Other%20Player/NA2'))
+                return {'puuid':'p1','gameName':'Other Player','tagLine':'NA2'}
+
             def get(inner,host,path,method,params=None):
-                if method=='account':
-                    self.assertTrue(path.endswith('/Other%20Player/NA2'))
-                    return {'puuid':'p1','gameName':'Other Player','tagLine':'NA2'}
                 if method=='summoner':
                     return {'profileIconId':7128,'summonerLevel':99}
                 if method=='ids':
@@ -111,7 +114,7 @@ class StoreTests(unittest.TestCase):
         self.collector.activate_account(first)
         self.store.put_setting('anchors',['saved-first-match'])
         with patch('collector.server.RiotClient') as factory:
-            factory.return_value.get.return_value=None
+            factory.return_value.resolve_account.side_effect=[first,None]
             self.collector.run(('Missing','NA1'))
         self.assertEqual(self.collector.account,first)
         self.assertEqual(self.store.setting('anchors'),['saved-first-match'])
@@ -183,15 +186,18 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(view['gap'])
 
     def test_rank_observation_time_and_restart_do_not_persist_key(self):
-        self.collector.key = 'not-a-real-key'
+        self.collector.keys.add(['RGAPI-'+('x'*24),'RGAPI-'+('y'*24)])
         self.collector.update(status='running')
         with patch('collector.server.time.time', return_value=123456):
             self.store.put_snapshot('p0', {'rank': None, 'sourceMatch': 'anchor'})
         self.assertEqual(self.store.snapshot('p0')['observedAt'], 123456000)
         restarted = Collector(self.store)
         self.assertEqual(restarted.state['status'], 'paused')
-        self.assertFalse(restarted.key)
-        self.assertNotIn('not-a-real-key', json.dumps(restarted.view()))
+        self.assertFalse(restarted.keys.usable())
+        for secret in ('RGAPI-'+('x'*24),'RGAPI-'+('y'*24)):
+            self.assertNotIn(secret,json.dumps(self.collector.view()))
+            self.assertNotIn(secret,Path(self.store.path).read_bytes().decode(errors='ignore'))
+        self.assertEqual(restarted.view()['apiKeys'],[])
 
     def test_local_api_requires_valid_origin_and_change_token(self):
         httpd = ThreadingHTTPServer(('127.0.0.1', 0), handler_class(self.collector))
@@ -215,6 +221,22 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(request('/api/pause', b'{}', **{'Content-Type': 'application/json'})[0], 403)
             self.assertEqual(request('/api/pause', b'{}', **{'Content-Type': 'application/json', 'X-Queue-Lab-Token': status['csrf']})[0], 200)
             self.assertNotIn('csrf', request('/api/export')[1])
+            synthetic='RGAPI-'+('t'*24)
+            body=json.dumps({'keys':[synthetic,synthetic]}).encode()
+            self.assertEqual(request('/api/keys',body,**{'Content-Type':'application/json'})[0],403)
+            headers={'Content-Type':'application/json','X-Queue-Lab-Token':status['csrf']}
+            self.assertEqual(request('/api/keys',body,**headers)[0],200)
+            saved=request('/api/status')[1]
+            self.assertEqual(len(saved['apiKeys']),1)
+            self.assertNotIn(synthetic,json.dumps(saved))
+            self.assertNotIn('apiKeys',request('/api/export')[1])
+            invalid=json.dumps({'keys':['RGAPI-'+('u'*24),'invalid']}).encode()
+            self.assertEqual(request('/api/keys',invalid,**headers)[0],400)
+            self.assertEqual(len(request('/api/status')[1]['apiKeys']),1)
+            removal=json.dumps({'removeId':saved['apiKeys'][0]['id']}).encode()
+            self.assertEqual(request('/api/keys',removal,**headers)[0],200)
+            self.assertFalse(request('/api/status')[1]['connected'])
+
             self.store.put_match(match('anchor',100_000_000))
             self.store.put_setting('anchors',['anchor'])
             self.collector.account={'puuid':'p0'}

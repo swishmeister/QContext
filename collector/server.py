@@ -1,7 +1,9 @@
 """Local-only Riot collector. Python 3.11+, no third-party dependencies."""
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -13,6 +15,7 @@ import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import combinations
 from pathlib import Path
@@ -221,100 +224,278 @@ class Store:
 
 
 class RateLimiter:
-    """Conservative defaults plus Riot's application/method limits and Retry-After."""
+    """One key's budgets, independently scoped by routing host and method."""
     def __init__(self):
         self.events = defaultdict(deque)
         self.limits = {}
-        self.blocked_until = 0.0
-        self.last = 0.0
+        self.blocked = defaultdict(float)
+        self.last = defaultdict(float)
+
+    def delay(self, host, method, now):
+        delay = max(0, self.blocked[(host,'app')]-now,
+                    self.blocked[(host,method)]-now, self.last[host]+1.3-now)
+        for key, fallback in [((host, 'app'), [(20,1),(100,120)]), ((host,method), [])]:
+            history = self.events[key]
+            limits = self.limits.get(key, fallback)
+            max_window = max([seconds for _,seconds in limits]+[120])
+            while history and history[0] <= now-max_window:
+                history.popleft()
+            for count, seconds in limits:
+                recent = [t for t in history if t > now-seconds]
+                if len(recent) >= count:
+                    delay = max(delay, recent[-count]+seconds-now+.1)
+        return delay
+
+    def reserve(self, host, method, now):
+        for key in [(host,'app'),(host,method)]:
+            self.events[key].append(now)
+        self.last[host] = now
 
     def wait(self, host, method, stop):
-        while True:
+        while not stop.is_set():
             now = time.monotonic()
-            delay = max(0, self.blocked_until-now, self.last+1.3-now)
-            for key, fallback in [((host, 'app'), [(20,1),(100,120)]), ((host,method), [])]:
-                history = self.events[key]
-                limits = self.limits.get(key, fallback)
-                max_window = max([s for _,s in limits]+[120])
-                while history and history[0] <= now-max_window:
-                    history.popleft()
-                for count, seconds in limits:
-                    recent = [t for t in history if t > now-seconds]
-                    if len(recent) >= count:
-                        delay = max(delay, recent[-count]+seconds-now+.1)
+            delay = self.delay(host,method,now)
             if delay <= 0:
-                for key in [(host,'app'),(host,method)]:
-                    self.events[key].append(now)
-                self.last = now
+                self.reserve(host,method,now)
                 return
-            if stop.wait(min(delay, 1)):
-                raise Paused()
+            stop.wait(min(delay,1))
+        raise Paused()
 
     def observe(self, host, method, headers):
-        for header, key in [('X-App-Rate-Limit',(host,'app')),('X-Method-Rate-Limit',(host,method))]:
+        for prefix, key in [('X-App-Rate-Limit',(host,'app')),('X-Method-Rate-Limit',(host,method))]:
             try:
-                limits = [tuple(map(int, p.split(':'))) for p in headers.get(header,'').split(',') if p]
-                if limits and all(c>0 and s>0 for c,s in limits):
+                limits = [tuple(map(int, p.split(':'))) for p in headers.get(prefix,'').split(',') if p]
+                if limits and all(c>0 and seconds>0 for c,seconds in limits):
                     self.limits[key] = limits
-            except ValueError:
+                counts = {seconds:count for count,seconds in
+                          (map(int,p.split(':')) for p in headers.get(prefix+'-Count','').split(',') if p)}
+                # Server counts include calls made outside this process. When full,
+                # conservatively wait a whole window rather than assuming its start.
+                now = time.monotonic()
+                for count,seconds in self.limits.get(key,[]):
+                    if counts.get(seconds,0)>=count:
+                        self.blocked[key] = max(self.blocked[key],now+seconds+.1)
+            except (ValueError,TypeError):
                 pass
 
 
-class RiotClient:
-    def __init__(self, key, stop, update, limiter=None):
-        self.key, self.stop, self.update = key, stop, update
+def retry_after(headers):
+    raw = headers.get('Retry-After','120')
+    try:
+        seconds = float(raw)
+    except (ValueError,TypeError):
+        try:
+            seconds = parsedate_to_datetime(raw).timestamp()-time.time()
+        except (ValueError,TypeError,OverflowError):
+            seconds = 120
+    return max(1,seconds) if math.isfinite(seconds) else 120
+
+
+class KeySlot:
+    def __init__(self, value, label, limiter=None):
+        self.value = value
+        self.id = secrets.token_hex(12)
+        self.label = label
         self.limiter = limiter or RateLimiter()
+        self.requests = 0
+        self.disabled = False
+        self.incompatible = False
+        self.verified = False
+        self.denied = {}
+        self.reason = None
+
+
+class KeyPool:
+    """Memory-only approved credentials; the import has a single request dispatcher."""
+    MAX_KEYS = 10
+
+    def __init__(self):
+        self.slots = []
+        self.lock = threading.RLock()
+        self.next_label = 1
+        self.cursor = 0
+        self.service_blocks = defaultdict(float)
+        # Removed secrets are forgotten, but their limits survive re-entry this session.
+        self.retired = {}
+
+    def add(self, values):
+        if not isinstance(values,list) or not 1<=len(values)<=self.MAX_KEYS:
+            raise ValueError('Enter between 1 and 10 API keys.')
+        clean = []
+        for value in values:
+            if not isinstance(value,str) or not re.fullmatch(r'RGAPI-[A-Za-z0-9-]{20,100}',value.strip()):
+                raise ValueError('Each key must begin with RGAPI- and contain a valid key value.')
+            if value.strip() not in clean:
+                clean.append(value.strip())
+        with self.lock:
+            new = [value for value in clean if all(slot.value!=value for slot in self.slots)]
+            if len(self.slots)+len(new)>self.MAX_KEYS:
+                raise ValueError('You can connect up to 10 API keys. Remove an old key first.')
+            for value in new:
+                digest = hashlib.sha256(value.encode()).digest()
+                slot = KeySlot(value,f'Key {self.next_label}',self.retired.pop(digest,None))
+                self.next_label += 1
+                self.slots.append(slot)
+
+    def remove(self, slot_id):
+        with self.lock:
+            slot = next((slot for slot in self.slots if slot.id==slot_id),None)
+            if slot is None:
+                raise ValueError('That key is no longer connected. Refresh Settings.')
+            self.retired[hashlib.sha256(slot.value.encode()).digest()] = slot.limiter
+            self.slots.remove(slot)
+
+    def usable(self):
+        with self.lock:
+            return any(not slot.disabled for slot in self.slots)
+
+    def summary(self):
+        with self.lock:
+            return [dict(id=slot.id,label=slot.label,requests=slot.requests,
+                         status='incompatible' if slot.incompatible else 'rejected' if slot.disabled else 'limited' if slot.denied else 'ready' if slot.verified else 'unverified',
+                         reason=slot.reason) for slot in self.slots]
+
+    def acquire(self, host, method, stop, only=None):
+        while not stop.is_set():
+            with self.lock:
+                available = [slot for slot in self.slots if not slot.disabled and (host,method) not in slot.denied and (only is None or slot is only) and (method=='account' or slot.verified)]
+                if not available:
+                    reason = next((slot.denied.get((host,method)) or slot.reason for slot in self.slots if slot.reason),None)
+                    raise RiotError(reason or 'No usable API keys. Open Settings to add a valid key.',403)
+                now = time.monotonic()
+                ordered = self.slots[self.cursor:]+self.slots[:self.cursor]
+                candidates = [(max(self.service_blocks[host]-now,slot.limiter.delay(host,method,now)),slot)
+                              for slot in ordered if slot in available]
+                delay,slot = min(candidates,key=lambda item:item[0])
+                if delay<=0:
+                    slot.limiter.reserve(host,method,now)
+                    slot.requests += 1
+                    self.cursor = (self.slots.index(slot)+1)%len(self.slots)
+                    return slot
+            stop.wait(min(delay,1))
+        raise Paused()
+
+    def observe(self, slot, host, method, headers):
+        with self.lock:
+            slot.limiter.observe(host,method,headers)
+
+    def throttle(self, slot, host, method, headers):
+        seconds = retry_after(headers)
+        until = time.monotonic()+seconds+.1
+        scope = headers.get('X-Rate-Limit-Type','').lower()
+        with self.lock:
+            if scope in ('application','method'):
+                key = (host,'app' if scope=='application' else method)
+                slot.limiter.blocked[key] = max(slot.limiter.blocked[key],until)
+            else:
+                # A service/unknown limit applies to all keys, never rotate around it.
+                self.service_blocks[host] = max(self.service_blocks[host],until)
+        return seconds, scope
+
+    def reject(self, slot, host, method, reason, disable):
+        with self.lock:
+            slot.reason = reason
+            if disable:
+                slot.disabled = True
+            else:
+                slot.denied[(host,method)] = reason
+
+
+class RiotClient:
+    def __init__(self, keys, stop, update, limiter=None):
+        self.stop, self.update = stop, update
+        if isinstance(keys,KeyPool):
+            self.pool = keys
+        else:
+            # Keep the single-key client interface for isolated clients and fixtures.
+            self.pool = KeyPool()
+            self.pool.slots = [KeySlot(keys,'Key 1',limiter)]
+            self.pool.slots[0].verified = True
         self.calls = 0
 
-    def get(self, host, path, method, params=None):
+    def resolve_account(self, path, expected=None, verified_only=False):
+        # Riot can encrypt PUUIDs differently across applications. Prove that keys
+        # share an identity namespace before mixing their responses in one cache.
+        account = None
+        last_error = None
+        with self.pool.lock:
+            candidates = [slot for slot in self.pool.slots if not verified_only or slot.verified]
+            for slot in self.pool.slots:
+                slot.verified = False
+        for slot in candidates:
+            if slot.disabled:
+                continue
+            try:
+                candidate = self.get('americas',path,'account',only=slot)
+            except RiotError as error:
+                last_error = error
+                if error.status in (401,403):
+                    continue
+                raise
+            if not candidate or not candidate.get('puuid'):
+                continue
+            baseline = expected or (account or {}).get('puuid')
+            if baseline and candidate['puuid']!=baseline:
+                with self.pool.lock:
+                    slot.incompatible = True
+                message = 'This key returns different player identifiers and cannot share this profile’s saved data. Use keys from the same Riot application.'
+                self.pool.reject(slot,'americas','account',message,True)
+                last_error = RiotError(message)
+                continue
+            with self.pool.lock:
+                slot.verified = True
+            account = account or candidate
+        if account is None and last_error:
+            raise last_error
+        return account
+
+    def get(self, host, path, method, params=None, only=None):
         assert host in ('americas', 'na1')
         url = f'https://{host}.api.riotgames.com{path}'
         if params:
             url += '?' + urllib.parse.urlencode(params)
-        for attempt in range(5):
-            if self.stop.is_set():
-                raise Paused()
-            self.limiter.wait(host, method, self.stop)
-            # Identify the app: the default Python client identity can be rejected
-            # by the edge before the request reaches Riot's API authentication.
+        attempt = 0
+        while attempt<5:
+            slot = self.pool.acquire(host,method,self.stop,only)
             req = urllib.request.Request(url, headers={
-                'X-Riot-Token': self.key, 'Accept': 'application/json',
+                'X-Riot-Token': slot.value, 'Accept': 'application/json',
                 'User-Agent': 'QueueLab/0.1 (local personal research)',
             })
             self.calls += 1
             self.update(requests=self.calls)
             try:
                 with urllib.request.urlopen(req, timeout=25) as response:
-                    self.limiter.observe(host, method, response.headers)
+                    self.pool.observe(slot,host,method,response.headers)
                     return json.load(response)
             except urllib.error.HTTPError as e:
-                self.limiter.observe(host, method, e.headers)
+                self.pool.observe(slot,host,method,e.headers)
                 if e.code == 404:
                     return None
                 if e.code in (401,403):
                     if 'application/json' not in e.headers.get('Content-Type','').lower():
-                        raise RiotError('The connection was blocked before Riot could validate the key. Your key may still be valid; retry the import after checking the connection.') from None
-                    # Translate only recognized authentication reasons; never echo
-                    # upstream text, which could contain credentials or identifiers.
+                        raise RiotError('The connection was blocked before Riot could validate the key. Your keys may still be valid; retry after checking the connection.') from None
                     try:
                         reason = json.loads(e.read(4096)).get('status',{}).get('message','').lower()
                     except (ValueError,AttributeError,TypeError):
                         reason = ''
                     self.update(apiStatus=e.code,apiMethod=method)
-                    if 'expired' in reason:
-                        detail = 'Riot reports that the key has expired.'
-                    elif 'invalid api' in reason or 'unknown api' in reason:
-                        detail = 'Riot does not recognize this API key.'
-                    else:
-                        detail = 'Riot rejected the key or access to this endpoint.'
-                    raise RiotError(f'{detail} HTTP {e.code} during {method} lookup. Generate a fresh development key in the Riot Developer Portal, then paste it here and retry.', e.code) from None
+                    expired = 'expired' in reason
+                    invalid = 'invalid api' in reason or 'unknown api' in reason
+                    detail = ('Riot reports that the key has expired.' if expired else
+                              'Riot does not recognize this API key.' if invalid else
+                              'Riot rejected the key or access to this endpoint.')
+                    safe_reason = f'{detail} HTTP {e.code} during {method} lookup. Replace it in Settings.'
+                    self.pool.reject(slot,host,method,safe_reason,e.code==401 or expired or invalid)
+                    self.update(warning=f'{slot.label} was rejected for {method}. Check Settings; other usable keys will continue.')
+                    # Authentication failures don't consume the transient-retry budget.
+                    if only is not None or not any(not item.disabled and (host,method) not in item.denied for item in self.pool.slots):
+                        raise RiotError(safe_reason,e.code) from None
+                    continue
                 if e.code == 429:
-                    try:
-                        wait = max(1, float(e.headers.get('Retry-After','120')))
-                    except ValueError:
-                        wait = 120
-                    self.limiter.blocked_until = time.monotonic()+wait
-                    self.update(message=f'Riot rate limit reached. Waiting {round(wait)} seconds; saved progress is safe.')
+                    seconds,scope = self.pool.throttle(slot,host,method,e.headers)
+                    self.update(message=(f'Riot asked all keys to wait {round(seconds)} seconds on {host}.'
+                                         if scope not in ('application','method') else
+                                         f'{slot.label} is cooling down for {round(seconds)} seconds; scheduling available keys.'))
                 elif e.code >= 500:
                     if self.stop.wait(min(30,2**attempt)):
                         raise Paused()
@@ -323,17 +504,17 @@ class RiotClient:
             except (urllib.error.URLError, TimeoutError, OSError):
                 if self.stop.wait(min(30,2**attempt)):
                     raise Paused()
+            attempt += 1
         raise RiotError('Riot is unavailable or still rate limiting requests. Refresh to resume from saved data.')
 
 
 class Collector:
     def __init__(self, store):
         self.store = store
-        self.key = ''
+        self.keys = KeyPool()
         self.stop = threading.Event()
         self.lock = threading.RLock()
         self.thread = None
-        self.limiter = RateLimiter()
         self.state = store.setting('job', {'status':'idle','message':'Connect a Riot key to start.','requests':0,'done':0,'total':0})
         if self.state['status'] in ('running','pausing'):
             self.state.update(status='paused',message='Collector restarted. Reconnect your key to resume saved progress.')
@@ -353,16 +534,27 @@ class Collector:
             if self.thread and self.thread.is_alive():
                 raise ValueError('An import is already running.')
             if key is not None:
-                if not isinstance(key,str) or not re.fullmatch(r'RGAPI-[A-Za-z0-9-]{20,100}',key.strip()):
-                    raise ValueError('Enter a Riot API key beginning with RGAPI-.')
-                self.key = key.strip()
-            if not self.key:
-                raise ValueError('Connect your Riot API key first.')
+                self.keys.add([key])
+            if not self.keys.usable():
+                raise ValueError('Open Settings and connect a valid Riot API key first.')
             self.stop.clear()
             self.update(status='running',message=f'Looking up {target[0]}#{target[1]}…',requests=0,done=0,total=0,warning=None,
                         startedAt=int(time.time()*1000),apiStatus=None,apiMethod=None)
             self.thread = threading.Thread(target=self.run,args=(target,),daemon=True)
             self.thread.start()
+
+    def configure_keys(self, keys=None, remove_id=None):
+        with self.lock:
+            if self.thread and self.thread.is_alive():
+                raise ValueError('Pause the import before changing API keys.')
+            if (keys is None)==(remove_id is None):
+                raise ValueError('Add keys or remove one key at a time.')
+            if keys is not None:
+                self.keys.add(keys)
+            elif isinstance(remove_id,str):
+                self.keys.remove(remove_id)
+            else:
+                raise ValueError('Choose a connected key to remove.')
 
     def pause(self):
         with self.lock:
@@ -482,11 +674,21 @@ class Collector:
             self.store.put_setting('anchors',saved.get('anchors',[]))
 
     def run(self, target=None):
-        api = RiotClient(self.key,self.stop,self.update,self.limiter)
+        api = RiotClient(self.keys,self.stop,self.update)
         try:
             name, tag = target or ((self.account or {}).get('gameName','Llewellyn'),(self.account or {}).get('tagLine','300'))
             path = '/riot/account/v1/accounts/by-riot-id/'+urllib.parse.quote(name,safe='')+'/'+urllib.parse.quote(tag,safe='')
-            account = api.get('americas',path,'account')
+            probe = self.store.setting('identity_probe') or self.account
+            probe_account = None
+            same_probe = False
+            if probe and probe.get('gameName') and probe.get('tagLine'):
+                probe_path = '/riot/account/v1/accounts/by-riot-id/'+urllib.parse.quote(probe['gameName'],safe='')+'/'+urllib.parse.quote(probe['tagLine'],safe='')
+                probe_account = api.resolve_account(probe_path,probe['puuid'])
+                if not probe_account:
+                    # A renamed probe must not silently reset the cache's namespace.
+                    raise RiotError('The saved identity-check profile could not be found. Its Riot ID may have changed; the import stopped before mixing key data.')
+                same_probe = probe['gameName'].casefold()==name.casefold() and probe['tagLine'].casefold()==tag.casefold()
+            account = probe_account if same_probe else api.resolve_account(path,verified_only=bool(probe_account))
             if not account or not account.get('puuid'):
                 raise RiotError(f'Riot could not find {name}#{tag}. Check the full Riot ID and that the player is on North America.')
             account.setdefault('gameName',name)
@@ -496,6 +698,8 @@ class Collector:
             if not summoner:
                 raise RiotError('This profile was not found on North America. The current search supports NA accounts.')
             account.update(profileIconId=summoner.get('profileIconId'),summonerLevel=summoner.get('summonerLevel'),profileObservedAt=int(time.time()*1000))
+            if not self.store.setting('identity_probe'):
+                self.store.put_setting('identity_probe',dict(puuid=account['puuid'],gameName=account['gameName'],tagLine=account['tagLine']))
             self.activate_account(account)
             anchors, skipped = [], 0
             self.update(message='Loading your last 20 completed ranked games…')
@@ -541,8 +745,6 @@ class Collector:
         except Paused:
             self.update(status='paused',message='Paused. Refresh profile to resume from saved matches.')
         except RiotError as e:
-            if e.status in (401,403):
-                self.key = ''
             self.update(status='error',message=str(e))
         except Exception:
             # Never echo request objects, key material, or raw upstream bodies.
@@ -555,7 +757,7 @@ class Collector:
     def _view(self):
         with self.lock:
             state = dict(self.state)
-            connected = bool(self.key)
+            connected = self.keys.usable()
         result = []
         for mid in self.store.setting('anchors',[]):
             match = self.store.match(mid)
@@ -602,7 +804,7 @@ class Collector:
         icon_url = f'https://ddragon.leagueoflegends.com/cdn/{ICON_VERSION}/img/profileicon/{icon}.png' if isinstance(icon,int) and icon>=0 else None
         return dict(account={'name':account.get('gameName','Llewellyn'),'tag':account.get('tagLine','300'),'puuid':account.get('puuid'),
                              'platform':'NA','queue':'Ranked Solo/Duo','iconUrl':icon_url,'level':account.get('summonerLevel')},connected=connected,
-                    job=state,matches=result,snapshotCount=snapshots,cachedMatches=cached,
+                    job=state,matches=result,snapshotCount=snapshots,cachedMatches=cached,apiKeys=self.keys.summary(),
                     methodology={'historyGames':WINDOW,'targetGames':TARGET,'queueId':QUEUE,'minimumDurationSeconds':180,
                                  'comparison':'Mean of four teammate win rates minus mean of five opponent win rates. Only complete 20-game histories enter comparisons.',
                                  'rank':'Rank at observation time, never claimed to be pre-match rank.',
@@ -637,7 +839,9 @@ def handler_class(collector):
             if self.path == '/api/status':
                 return self.send(200,dict(collector.view(),csrf=csrf))
             if self.path == '/api/export':
-                return self.send(200,collector.view())
+                observations = collector.view()
+                observations.pop('apiKeys',None)
+                return self.send(200,observations)
             return self.send(404,{'error':'Not found.'})
 
         def do_POST(self):
@@ -645,13 +849,15 @@ def handler_class(collector):
                 return self.send(403,{'error':'Refresh the local dashboard before making changes.'})
             try:
                 length = int(self.headers.get('Content-Length','0'))
-                if not 0 <= length <= 2048 or self.headers.get('Content-Type','').split(';')[0] != 'application/json':
+                if not 0 <= length <= 4096 or self.headers.get('Content-Type','').split(';')[0] != 'application/json':
                     return self.send(400,{'error':'Expected a small JSON request.'})
                 body = json.loads(self.rfile.read(length) or b'{}')
                 if not isinstance(body,dict):
                     raise ValueError('Expected an object.')
                 if self.path == '/api/import':
                     collector.start(body.get('key'),body.get('riotId'))
+                elif self.path == '/api/keys':
+                    collector.configure_keys(body.get('keys'),body.get('removeId'))
                 elif self.path == '/api/pause':
                     collector.pause()
                 elif self.path == '/api/duo':
@@ -660,7 +866,7 @@ def handler_class(collector):
                     return self.send(404,{'error':'Not found.'})
                 return self.send(200,{'ok':True})
             except ValueError as e:
-                if self.path=='/api/duo':
+                if self.path in ('/api/duo','/api/keys'):
                     return self.send(400,{'error':str(e)})
                 return self.send(400,{'error':'Check your key, or wait for the current import to stop before refreshing.'})
             except TypeError:
