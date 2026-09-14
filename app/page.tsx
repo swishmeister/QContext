@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Activity, ArrowDownToLine, ArrowRight, Database, KeyRound, Pause, RefreshCw, ShieldCheck, ChevronDown, Check, AlertCircle, Search, Settings, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { profileStats } from '@/lib/profile-stats';
 import { Sheet, SheetTrigger, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 
@@ -69,9 +70,7 @@ export default function Home() {
     return()=>lifecycle.abort();
   },[action,load]);
   const matches=data?.matches??[];
-  const complete=matches.filter(m=>m.complete);
-  const avg=complete.length?complete.reduce((n,m)=>n+(m.gap??0),0)/complete.length:null;
-  const wins=matches.filter(m=>m.win).length;
+  const stats=profileStats(matches);
   const running=data?.job.status==='running'||data?.job.status==='pausing';
   const active=matches.find(m=>m.id===selected)??null;
   const configuredKeys=data?.apiKeys??[];
@@ -122,7 +121,12 @@ export default function Home() {
       <div className="page-heading"><div><p className="eyebrow">MATCHMAKING / PERSONAL PILOT</p><h1>Your matches, in context.</h1><p className="subtitle">Compare the histories players brought into each game.</p></div><span className="version">PILOT 01</span></div>
       <form className="profile-search" onSubmit={e=>{e.preventDefault();if(!data?.connected){openSettings();setSettingsMessage('Add your Riot API keys, then search this profile again.');return;}setSelected(null);handleAction('/api/import',{riotId:search});}}><label htmlFor="profile-search">Summoner profile</label><div className="search-controls"><span className="region-label">NA</span><Input id="profile-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Game name#Tag" required maxLength={80} disabled={running||pending}/><Button type="submit" disabled={!online||pending||running||!search.trim()}><Search size={16}/>Search profile</Button></div><p>{running?'Pause the current import to search another profile.':'Enter a Riot ID, including the #tag. Saved matches are reused when you switch profiles.'}</p></form>
       <section className="account-strip"><ProfileIcon key={profile.iconUrl} profile={profile}/><div><h2>{profile.name}<span>#{profile.tag}</span></h2><p>North America <span className="dot">·</span> Ranked Solo / Duo{profile.level?` · Level ${profile.level}`:''}</p></div><Button className="refresh" disabled={!online||!data?.connected||pending||running} onClick={()=>handleAction('/api/import')}><RefreshCw size={16}/> {data?.job.status==='paused'?'Resume import':'Refresh profile'}</Button></section>
-      <section className="stats-grid"><div><p>Matches in this pilot</p><strong>{matches.length} <small>/ 20</small></strong><span>{matches.length?`${wins} wins · ${matches.length-wins} losses`:'Completed ranked games'}</span></div><div><p>Histories processed</p><strong>{data?.job.done??0} <small>/ {data?.job.total||200}</small></strong><span>{complete.length} complete team comparisons</span></div><div><p>Team history difference</p><strong>{avg===null?'—':`${avg>0?'+':''}${avg.toFixed(1)}`} <small>{avg===null?'':'pp'}</small></strong><span>Teammates minus opponents</span></div><div><p>Rank snapshots</p><strong>{data?.snapshotCount??0}</strong><span>At observation time</span></div></section>
+      <section className="stats-grid" aria-label="Profile statistics">
+        <div><p>Current rank</p><strong className="rank-value">{stats.currentRank??'—'}</strong><span>{stats.rankObservedAt?`Observed ${date(stats.rankObservedAt)}`:'No rank observation yet'}</span></div>
+        <div><p>Win rate · past 20 games</p><strong>{stats.winRate===null?'—':`${stats.winRate.toFixed(1)}%`}</strong><span>{stats.games?`${stats.wins} wins · ${stats.losses} losses${stats.games<20?` · ${stats.games}/20 games available`:''}`:'No completed games yet'}</span></div>
+        <div title="Average of all 10 players per match, including you, across the displayed games. Repeat players count once per match. Missing and unranked players are excluded. Uses latest observed ranks, not historical match ranks; 100 LP per division with a shared Master+ LP scale."><p>Lobby average rank</p><strong className="rank-value">{stats.lobbyRank??'—'}</strong><span>{stats.games?`Across ${stats.games} games · ${stats.rankedPlayers}/${stats.playerCount} ranks`:'No lobby ranks yet'}</span><span className="stat-note">Latest observed ranks</span></div>
+        <div><p>Team history difference</p><strong>{stats.historyDifference===null?'—':`${stats.historyDifference>0?'+':''}${stats.historyDifference.toFixed(1)}`} <small>{stats.historyDifference===null?'':'pp'}</small></strong><span>Teammates minus opponents</span><span className="stat-note">{stats.comparisonCount}/{stats.games} complete comparisons</span></div>
+      </section>
       {!online&&<div className="notice"><AlertCircle size={18}/><div>The collector is not responding. Start Queue Lab’s local launcher; the page will reconnect automatically.</div></div>}
       {error&&<div className="notice error" role="alert"><AlertCircle size={18}/>{error}</div>}
       {data?.job.status==='error'&&<div className="notice error" role="alert"><AlertCircle size={18}/><div><strong>Import stopped.</strong> {data.job.message}</div></div>}

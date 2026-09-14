@@ -33,6 +33,10 @@ Riot player identifiers can differ between applications. Before importing, every
 
 Multi-key behavior is verified with synthetic responses and a simulated clock, including shared cooldowns, rejection/failover, identifier compatibility, duplicate keys, pause behavior, and secret-free exports. Actual throughput still needs to be measured using the approved keys entered locally.
 
+## Profile summary
+
+The cards below the account show current rank, win rate over the displayed last 20 games, lobby average rank, and team history difference. Current rank uses the latest saved self-player rank observation and displays its timestamp. Lobby rank averages the available ranked player appearances across all ten players in each displayed game, including you; repeat players count once per appearance, and missing/unranked entries are excluded with coverage shown. The average uses the same 100 LP per division / shared Master+ scale as the match details. These are observed ranks, not reconstructed historical ranks. Team history difference uses only complete comparisons and shows how many are available.
+
 ## What it collects
 
 - Your latest 20 available ranked Solo/Duo matches, excluding games shorter than three minutes as a remake approximation.
