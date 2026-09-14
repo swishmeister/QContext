@@ -208,7 +208,20 @@ class RiotClient:
                 if e.code in (401,403):
                     if 'application/json' not in e.headers.get('Content-Type','').lower():
                         raise RiotError('The connection was blocked before Riot could validate the key. Your key may still be valid; retry the import after checking the connection.') from None
-                    raise RiotError('Riot rejected the key or this API access. Enter a valid development/personal key from the Riot Developer Portal.', e.code) from None
+                    # Translate only recognized authentication reasons; never echo
+                    # upstream text, which could contain credentials or identifiers.
+                    try:
+                        reason = json.loads(e.read(4096)).get('status',{}).get('message','').lower()
+                    except (ValueError,AttributeError,TypeError):
+                        reason = ''
+                    self.update(apiStatus=e.code,apiMethod=method)
+                    if 'expired' in reason:
+                        detail = 'Riot reports that the key has expired.'
+                    elif 'invalid api' in reason or 'unknown api' in reason:
+                        detail = 'Riot does not recognize this API key.'
+                    else:
+                        detail = 'Riot rejected the key or access to this endpoint.'
+                    raise RiotError(f'{detail} HTTP {e.code} during {method} lookup. Generate a fresh development key in the Riot Developer Portal, then paste it here and retry.', e.code) from None
                 if e.code == 429:
                     try:
                         wait = max(1, float(e.headers.get('Retry-After','120')))
@@ -244,6 +257,7 @@ class Collector:
     def update(self, **values):
         with self.lock:
             self.state.update(values)
+            self.state['updatedAt'] = int(time.time()*1000)
             self.store.put_setting('job',self.state)
 
     def start(self, key=None):
@@ -257,7 +271,8 @@ class Collector:
             if not self.key:
                 raise ValueError('Connect your Riot API key first.')
             self.stop.clear()
-            self.update(status='running',message='Looking up Llewellyn#300…',requests=0,done=0,total=0,warning=None)
+            self.update(status='running',message='Looking up Llewellyn#300…',requests=0,done=0,total=0,warning=None,
+                        startedAt=int(time.time()*1000),apiStatus=None,apiMethod=None)
             self.thread = threading.Thread(target=self.run,daemon=True)
             self.thread.start()
 

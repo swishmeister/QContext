@@ -172,6 +172,19 @@ class RateTests(unittest.TestCase):
 
 
 class RiotClientTests(unittest.TestCase):
+    def test_expired_key_reports_safe_reason_and_response_code(self):
+        updates = []
+        client = RiotClient('synthetic-test-key', threading.Event(), lambda **v: updates.append(v))
+        body = json.dumps({'status': {'message': 'API key expired synthetic-test-key'}}).encode()
+        error = urllib.error.HTTPError('https://americas.api.riotgames.com/test', 403, 'Forbidden', {'Content-Type': 'application/json'}, io.BytesIO(body))
+        with patch('collector.server.urllib.request.urlopen', side_effect=error):
+            with self.assertRaises(RiotError) as caught:
+                client.get('americas', '/test', 'account')
+        self.assertIn('expired', str(caught.exception))
+        self.assertIn('HTTP 403 during account lookup', str(caught.exception))
+        self.assertNotIn('synthetic-test-key', str(caught.exception))
+        self.assertIn({'apiStatus': 403, 'apiMethod': 'account'}, updates)
+
     def test_requests_identify_queue_lab(self):
         client = RiotClient('synthetic-test-key', threading.Event(), lambda **_: None)
         response = io.BytesIO(b'{"puuid":"synthetic-player"}')
