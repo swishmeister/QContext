@@ -1,20 +1,22 @@
-# Single-user hosted workspace. Review the paid service and disk cost in Render.
+# Free testing deployment.
+# SQLite data is temporary and can be lost whenever Render restarts,
+# redeploys, or spins down the service.
+
 services:
   - type: web
     name: queue-context
     runtime: docker
-    plan: 1c-2g
+    plan: free
     numInstances: 1
     dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz
-    disk:
-      name: queue-context-data
-      mountPath: /var/data
-      sizeGB: 1
+
     envVars:
       - key: QUEUE_CONTEXT_USERNAME
         value: owner
+
       - key: QUEUE_CONTEXT_PASSWORD
         sync: false
+
       - key: QUEUE_CONTEXT_DATA_DIR
         value: /var/data
