@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +21,48 @@ ROOT = Path(__file__).resolve().parents[1]
 QUEUE = 420
 WINDOW = 20
 TARGET = 20
+ICON_VERSION = '16.18.1'
+ROLES = {'TOP':'Top','JUNGLE':'Jungle','MIDDLE':'Mid','BOTTOM':'ADC','UTILITY':'Support','SUPPORT':'Support'}
+TIERS = ['IRON','BRONZE','SILVER','GOLD','PLATINUM','EMERALD','DIAMOND']
+DIVISIONS = ['IV','III','II','I']
+
+
+def parse_riot_id(value):
+    if not isinstance(value,str) or value.count('#') != 1 or len(value)>80 or any(ord(c)<32 for c in value):
+        raise ValueError('Enter a Riot ID as Name#Tag.')
+    name, tag = (part.strip() for part in value.split('#'))
+    if not name or not tag:
+        raise ValueError('Both the game name and tag are required.')
+    return name, tag
+
+
+def average_rank(players):
+    values, observations = [], []
+    for player in players:
+        snapshot = player.get('rankSnapshot') or {}
+        rank = snapshot.get('rank') or {}
+        tier, division, lp = rank.get('tier'), rank.get('rank'), rank.get('leaguePoints')
+        if not isinstance(lp,(int,float)) or lp < 0:
+            continue
+        if tier in TIERS and division in DIVISIONS:
+            value = TIERS.index(tier)*400 + DIVISIONS.index(division)*100 + lp
+        elif tier in ('MASTER','GRANDMASTER','CHALLENGER'):
+            # Apex tiers share an LP ladder; their changing thresholds aren't divisions.
+            value = 2800 + lp
+        else:
+            continue
+        values.append(value)
+        if snapshot.get('observedAt'):
+            observations.append(snapshot['observedAt'])
+    result = dict(label=None,count=len(values),total=len(players),oldestObservation=min(observations) if observations else None,
+                  newestObservation=max(observations) if observations else None)
+    if values:
+        score = int(mean(values)+0.5)
+        if score >= 2800:
+            result['label'] = f'Master+ {score-2800} LP'
+        else:
+            result['label'] = f'{TIERS[score//400].title()} {DIVISIONS[(score%400)//100]} {score%100} LP'
+    return result
 
 
 class Paused(Exception):
@@ -59,6 +101,11 @@ def summarize_history(games, puuid, before_ms, champion=None, role=None, missing
     valid.sort(key=lambda g: timing(g)[0], reverse=True)
     valid = valid[:WINDOW]
     players = [participant(g, puuid) for g in valid]
+    role_counts = Counter(ROLES[p['teamPosition']] for p in players if p.get('teamPosition') in ROLES)
+    main_count = max(role_counts.values(),default=0)
+    main_roles = sorted(r for r,c in role_counts.items() if c==main_count)
+    current_role = ROLES.get(role)
+    role_status = ('main' if current_role in main_roles else 'off') if current_role and main_roles else 'unknown'
     wins = sum(p.get('win') is True for p in players)
     streak = 0
     if players:
@@ -72,6 +119,7 @@ def summarize_history(games, puuid, before_ms, champion=None, role=None, missing
                 complete=len(players) == WINDOW and missing == 0, missing=missing,
                 championGames=sum(p.get('championName') == champion for p in players),
                 roleGames=sum(p.get('teamPosition') == role for p in players) if role else None,
+                mainRoles=main_roles,mainRoleGames=main_count,roleCounts=dict(role_counts),roleStatus=role_status,
                 streak=streak, matchIds=[g['metadata']['matchId'] for g in valid])
 
 
@@ -260,8 +308,10 @@ class Collector:
             self.state['updatedAt'] = int(time.time()*1000)
             self.store.put_setting('job',self.state)
 
-    def start(self, key=None):
+    def start(self, key=None, riot_id=None):
         with self.lock:
+            target = parse_riot_id(riot_id) if riot_id is not None else (
+                (self.account or {}).get('gameName','Llewellyn'),(self.account or {}).get('tagLine','300'))
             if self.thread and self.thread.is_alive():
                 raise ValueError('An import is already running.')
             if key is not None:
@@ -271,9 +321,9 @@ class Collector:
             if not self.key:
                 raise ValueError('Connect your Riot API key first.')
             self.stop.clear()
-            self.update(status='running',message='Looking up Llewellyn#300…',requests=0,done=0,total=0,warning=None,
+            self.update(status='running',message=f'Looking up {target[0]}#{target[1]}…',requests=0,done=0,total=0,warning=None,
                         startedAt=int(time.time()*1000),apiStatus=None,apiMethod=None)
-            self.thread = threading.Thread(target=self.run,daemon=True)
+            self.thread = threading.Thread(target=self.run,args=(target,),daemon=True)
             self.thread.start()
 
     def pause(self):
@@ -359,14 +409,33 @@ class Collector:
             with self.store.connect() as db:
                 db.execute('INSERT OR IGNORE INTO roster_snapshots VALUES (?)',(mid,))
 
-    def run(self):
-        api = RiotClient(self.key,self.stop,self.update,self.limiter)
-        try:
-            account = api.get('americas','/riot/account/v1/accounts/by-riot-id/Llewellyn/300','account')
-            if not account or not account.get('puuid'):
-                raise RiotError('Riot could not find Llewellyn#300 in the Americas region.')
+    def activate_account(self, account):
+        """Preserve each profile's anchors while sharing the immutable match cache."""
+        with self.lock:
+            if self.account:
+                self.store.put_setting('profile:'+self.account['puuid'],dict(account=self.account,anchors=self.store.setting('anchors',[])))
+            saved = self.store.setting('profile:'+account['puuid'],{})
+            account = {**saved.get('account',{}),**account}
             self.account = account
             self.store.put_setting('account',account)
+            self.store.put_setting('anchors',saved.get('anchors',[]))
+
+    def run(self, target=None):
+        api = RiotClient(self.key,self.stop,self.update,self.limiter)
+        try:
+            name, tag = target or ((self.account or {}).get('gameName','Llewellyn'),(self.account or {}).get('tagLine','300'))
+            path = '/riot/account/v1/accounts/by-riot-id/'+urllib.parse.quote(name,safe='')+'/'+urllib.parse.quote(tag,safe='')
+            account = api.get('americas',path,'account')
+            if not account or not account.get('puuid'):
+                raise RiotError(f'Riot could not find {name}#{tag}. Check the full Riot ID and that the player is on North America.')
+            account.setdefault('gameName',name)
+            account.setdefault('tagLine',tag)
+            # Confirm the platform before replacing the selected profile.
+            summoner = api.get('na1','/lol/summoner/v4/summoners/by-puuid/'+urllib.parse.quote(account['puuid'],safe=''),'summoner')
+            if not summoner:
+                raise RiotError('This profile was not found on North America. The current search supports NA accounts.')
+            account.update(profileIconId=summoner.get('profileIconId'),summonerLevel=summoner.get('summonerLevel'),profileObservedAt=int(time.time()*1000))
+            self.activate_account(account)
             anchors, skipped = [], 0
             self.update(message='Loading your last 20 completed ranked games…')
             for offset in range(0,200,40):
@@ -420,6 +489,10 @@ class Collector:
 
     def view(self):
         with self.lock:
+            return self._view()
+
+    def _view(self):
+        with self.lock:
             state = dict(self.state)
             connected = bool(self.key)
         result = []
@@ -452,13 +525,21 @@ class Collector:
             ally_mean = round(mean(p['history']['winRate'] for p in allies),2) if complete else None
             enemy_mean = round(mean(p['history']['winRate'] for p in enemies),2) if complete else None
             result.append(dict(id=mid,startedAt=start,duration=duration,win=bool(me['win']),champion=me.get('championName'),
+                               teamRanks={'allies':average_rank([p for p in people if p['team']==me['teamId']]),'enemies':average_rank(enemies)},
                                team=me['teamId'],participants=people,complete=complete,allyMean=ally_mean,enemyMean=enemy_mean,
                                gap=round(ally_mean-enemy_mean,2) if complete else None,
                                historiesReady=sum(p['history'] is not None for p in people)))
         with self.store.connect() as db:
             snapshots = db.execute('SELECT COUNT(*) FROM snapshots').fetchone()[0]
             cached = db.execute('SELECT COUNT(*) FROM matches').fetchone()[0]
-        return dict(account={'name':'Llewellyn','tag':'300','platform':'NA','queue':'Ranked Solo/Duo'},connected=connected,
+        account = self.account or {}
+        icon = account.get('profileIconId')
+        if icon is None and result:
+            latest = self.store.match(result[0]['id'])
+            icon = (participant(latest,account['puuid']) or {}).get('profileIcon')
+        icon_url = f'https://ddragon.leagueoflegends.com/cdn/{ICON_VERSION}/img/profileicon/{icon}.png' if isinstance(icon,int) and icon>=0 else None
+        return dict(account={'name':account.get('gameName','Llewellyn'),'tag':account.get('tagLine','300'),'puuid':account.get('puuid'),
+                             'platform':'NA','queue':'Ranked Solo/Duo','iconUrl':icon_url,'level':account.get('summonerLevel')},connected=connected,
                     job=state,matches=result,snapshotCount=snapshots,cachedMatches=cached,
                     methodology={'historyGames':WINDOW,'targetGames':TARGET,'queueId':QUEUE,'minimumDurationSeconds':180,
                                  'comparison':'Mean of four teammate win rates minus mean of five opponent win rates. Only complete 20-game histories enter comparisons.',
@@ -508,7 +589,7 @@ def handler_class(collector):
                 if not isinstance(body,dict):
                     raise ValueError('Expected an object.')
                 if self.path == '/api/import':
-                    collector.start(body.get('key'))
+                    collector.start(body.get('key'),body.get('riotId'))
                 elif self.path == '/api/pause':
                     collector.pause()
                 else:

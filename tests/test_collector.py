@@ -9,7 +9,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from collector.server import Collector, Paused, RateLimiter, RiotClient, RiotError, Store, handler_class, summarize_history
+from collector.server import Collector, Paused, RateLimiter, RiotClient, RiotError, Store, average_rank, handler_class, parse_riot_id, summarize_history
 
 
 def match(mid, start, wins=(), duration=1800, queue=420):
@@ -23,6 +23,17 @@ def match(mid, start, wins=(), duration=1800, queue=420):
 
 
 class HistoryTests(unittest.TestCase):
+    def test_main_roles_ties_support_and_off_role(self):
+        games = [match(f'h{i}', (i+1)*2_000_000) for i in range(20)]
+        for i,g in enumerate(games):
+            g['info']['participants'][0]['teamPosition'] = 'UTILITY' if i<10 else 'MIDDLE'
+        result = summarize_history(games,'p0',100_000_000,role='UTILITY')
+        self.assertEqual(result['mainRoles'],['Mid','Support'])
+        self.assertEqual(result['mainRoleGames'],10)
+        self.assertEqual(result['roleStatus'],'main')
+        self.assertEqual(summarize_history(games,'p0',100_000_000,role='JUNGLE')['roleStatus'],'off')
+        self.assertEqual(summarize_history([],'p0',100_000_000,role='UTILITY')['roleStatus'],'unknown')
+
     def test_only_completed_prior_ranked_matches_and_latest_twenty(self):
         cutoff = 100_000_000
         games = [match(f'old{i}', cutoff-(i+1)*2_000_000, wins=[0] if i < 10 else []) for i in range(25)]
@@ -53,6 +64,42 @@ class StoreTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_profile_switch_restores_anchors_and_uses_supplied_riot_id(self):
+        first = {'puuid':'p0','gameName':'First','tagLine':'NA1'}
+        self.collector.activate_account(first)
+        self.store.put_setting('anchors',['saved-first-match'])
+
+        class FakeAPI:
+            def get(inner,host,path,method,params=None):
+                if method=='account':
+                    self.assertTrue(path.endswith('/Other%20Player/NA2'))
+                    return {'puuid':'p1','gameName':'Other Player','tagLine':'NA2'}
+                if method=='summoner':
+                    return {'profileIconId':7128,'summonerLevel':99}
+                if method=='ids':
+                    return []
+                raise AssertionError(method)
+
+        with patch('collector.server.RiotClient',return_value=FakeAPI()):
+            self.collector.run(('Other Player','NA2'))
+        self.assertEqual(self.collector.account['puuid'],'p1')
+        self.assertEqual(self.store.setting('anchors'),[])
+        self.assertEqual(self.collector.view()['account']['name'],'Other Player')
+        self.assertIn('/7128.png',self.collector.view()['account']['iconUrl'])
+        self.collector.activate_account(first)
+        self.assertEqual(self.store.setting('anchors'),['saved-first-match'])
+
+    def test_unknown_profile_leaves_existing_account_selected(self):
+        first = {'puuid':'p0','gameName':'First','tagLine':'NA1'}
+        self.collector.activate_account(first)
+        self.store.put_setting('anchors',['saved-first-match'])
+        with patch('collector.server.RiotClient') as factory:
+            factory.return_value.get.return_value=None
+            self.collector.run(('Missing','NA1'))
+        self.assertEqual(self.collector.account,first)
+        self.assertEqual(self.store.setting('anchors'),['saved-first-match'])
+        self.assertEqual(self.collector.state['status'],'error')
 
     def test_pause_retains_matches_and_resume_reuses_them(self):
         games = {f'h{i}': match(f'h{i}', (30-i)*2_000_000) for i in range(20)}
@@ -169,6 +216,27 @@ class RateTests(unittest.TestCase):
             with self.assertRaises(Paused):
                 limiter.wait('americas', 'match', stop)
         self.assertEqual(len(limiter.events[('americas', 'app')]), 1)
+
+
+class RankAndSearchTests(unittest.TestCase):
+    def test_rank_average_crosses_divisions_and_excludes_unranked(self):
+        def player(division,lp):
+            return {'rankSnapshot':{'observedAt':123,'rank':{'tier':'EMERALD','rank':division,'leaguePoints':lp}}}
+        players=[player('II',60),player('I',20),{}, {'rankSnapshot':{'rank':None}}]
+        value=average_rank(players)
+        self.assertEqual((value['label'],value['count'],value['total']),('Emerald II 90 LP',2,4))
+        self.assertIsNone(average_rank([{},{}])['label'])
+        self.assertEqual(average_rank([player('II',99),player('I',1)])['label'],'Emerald I 0 LP')
+
+    def test_apex_tiers_use_shared_master_lp_scale(self):
+        players=[{'rankSnapshot':{'rank':{'tier':tier,'rank':'I','leaguePoints':lp}}} for tier,lp in [('MASTER',100),('CHALLENGER',900)]]
+        self.assertEqual(average_rank(players)['label'],'Master+ 500 LP')
+
+    def test_search_requires_full_riot_id(self):
+        self.assertEqual(parse_riot_id(' Other Player # NA1 '),('Other Player','NA1'))
+        for value in ('name','name#','#tag','name#tag#extra',None,'bad\nname#tag'):
+            with self.assertRaises(ValueError):
+                parse_riot_id(value)
 
 
 class RiotClientTests(unittest.TestCase):
