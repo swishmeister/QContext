@@ -180,6 +180,17 @@ class Store:
         self.database_url = os.environ.get('DATABASE_URL')
         self.is_postgres = bool(self.database_url)
         self.path = str(path)
+        self._local = threading.local()
+        self._pool = None
+
+        if self.is_postgres:
+            from psycopg2.pool import ThreadedConnectionPool
+            self._pool = ThreadedConnectionPool(
+                1,
+                5,
+                self.database_url,
+                connect_timeout=10,
+            )
 
         if not self.is_postgres:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -203,18 +214,28 @@ class Store:
 
     @contextmanager
     def connect(self):
-        if self.is_postgres:
-            import psycopg2
+        existing = getattr(self._local, 'db', None)
+        if existing is not None:
+            yield existing
+            return
 
-            db = psycopg2.connect(self.database_url, connect_timeout=20)
+        if self.is_postgres:
+            db = self._pool.getconn()
+            broken = False
             try:
                 yield db
                 db.commit()
             except Exception:
-                db.rollback()
+                try:
+                    db.rollback()
+                except Exception:
+                    broken = True
                 raise
             finally:
-                db.close()
+                self._pool.putconn(
+                    db,
+                    close=broken or bool(getattr(db, 'closed', 0)),
+                )
         else:
             db = sqlite3.connect(self.path, timeout=20)
             try:
@@ -222,6 +243,20 @@ class Store:
                     yield db
             finally:
                 db.close()
+
+    @contextmanager
+    def session(self):
+        existing = getattr(self._local, 'db', None)
+        if existing is not None:
+            yield existing
+            return
+
+        with self.connect() as db:
+            self._local.db = db
+            try:
+                yield db
+            finally:
+                self._local.db = None
 
     def execute(self, db, sql, params=()):
         if self.is_postgres:
@@ -850,7 +885,8 @@ class Collector:
 
     def view(self):
         with self.lock:
-            return self._view()
+            with self.store.session():
+                return self._view()
 
     def _view(self):
         with self.lock:
