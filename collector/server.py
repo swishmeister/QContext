@@ -425,7 +425,7 @@ class KeyPool:
                 available = [slot for slot in self.slots if not slot.disabled and (host,method) not in slot.denied and (only is None or slot is only) and (method=='account' or slot.verified)]
                 if not available:
                     reason = next((slot.denied.get((host,method)) or slot.reason for slot in self.slots if slot.reason),None)
-                    raise RiotError(reason or 'No usable API keys. Open Settings to add a valid key.',403)
+                    raise RiotError(reason or 'No usable Riot API key. Update RIOT_API_KEY on the server.',403)
                 now = time.monotonic()
                 ordered = self.slots[self.cursor:]+self.slots[:self.cursor]
                 candidates = [(max(self.service_blocks[host]-now,slot.limiter.delay(host,method,now)),slot)
@@ -548,9 +548,9 @@ class RiotClient:
                     detail = ('Riot reports that the key has expired.' if expired else
                               'Riot does not recognize this API key.' if invalid else
                               'Riot rejected the key or access to this endpoint.')
-                    safe_reason = f'{detail} HTTP {e.code} during {method} lookup. Replace it in Settings.'
+                    safe_reason = f'{detail} HTTP {e.code} during {method} lookup. Update RIOT_API_KEY on the server.'
                     self.pool.reject(slot,host,method,safe_reason,e.code==401 or expired or invalid)
-                    self.update(warning=f'{slot.label} was rejected for {method}. Check Settings; other usable keys will continue.')
+                    self.update(warning=f'{slot.label} was rejected for {method}. Update RIOT_API_KEY on the server.')
                     # Authentication failures don't consume the transient-retry budget.
                     if only is not None or not any(not item.disabled and (host,method) not in item.denied for item in self.pool.slots):
                         raise RiotError(safe_reason,e.code) from None
@@ -576,50 +576,84 @@ class Collector:
     def __init__(self, store):
         self.store = store
         self.keys = KeyPool()
+
+        server_key = os.environ.get('RIOT_API_KEY', '').strip()
+        server_key_valid = bool(
+            re.fullmatch(r'RGAPI-[A-Za-z0-9-]{20,100}', server_key)
+        )
+        if server_key_valid:
+            self.keys.add([server_key])
+
         self.stop = threading.Event()
         self.lock = threading.RLock()
         self.thread = None
-        self.state = store.setting('job', {'status':'idle','message':'Connect a Riot key to start.','requests':0,'done':0,'total':0})
-        if self.state['status'] in ('running','pausing'):
-            self.state.update(status='paused',message='Collector restarted. Reconnect your key to resume saved progress.')
+
+        default_message = (
+            'Ready to import.'
+            if self.keys.usable()
+            else 'Server Riot API key is not configured.'
+        )
+        self.state = store.setting(
+            'job',
+            {
+                'status': 'idle',
+                'message': default_message,
+                'requests': 0,
+                'done': 0,
+                'total': 0,
+            },
+        )
+
+        if self.state['status'] in ('running', 'pausing'):
+            self.state.update(
+                status='paused',
+                message='Collector restarted. Refresh profile to resume saved progress.',
+            )
+        elif not self.keys.usable():
+            self.state.update(
+                status='idle',
+                message='Server Riot API key is not configured.',
+            )
+
         self.account = store.setting('account')
         self.summary_cache = {}
-
     def update(self, **values):
         with self.lock:
             self.state.update(values)
             self.state['updatedAt'] = int(time.time()*1000)
             self.store.put_setting('job',self.state)
 
-    def start(self, key=None, riot_id=None):
+    def start(self, riot_id=None):
         with self.lock:
             target = parse_riot_id(riot_id) if riot_id is not None else (
-                (self.account or {}).get('gameName','Llewellyn'),(self.account or {}).get('tagLine','300'))
+                (self.account or {}).get('gameName','Llewellyn'),
+                (self.account or {}).get('tagLine','300'),
+            )
             if self.thread and self.thread.is_alive():
                 raise ValueError('An import is already running.')
-            if key is not None:
-                self.keys.add([key])
             if not self.keys.usable():
-                raise ValueError('Open Settings and connect a valid Riot API key first.')
+                raise ValueError(
+                    'RIOT_API_KEY is not configured or was rejected. '
+                    'Update it on the server and redeploy.'
+                )
             self.stop.clear()
-            self.update(status='running',message=f'Looking up {target[0]}#{target[1]}…',requests=0,done=0,total=0,warning=None,
-                        startedAt=int(time.time()*1000),apiStatus=None,apiMethod=None)
-            self.thread = threading.Thread(target=self.run,args=(target,),daemon=True)
+            self.update(
+                status='running',
+                message=f'Looking up {target[0]}#{target[1]}…',
+                requests=0,
+                done=0,
+                total=0,
+                warning=None,
+                startedAt=int(time.time()*1000),
+                apiStatus=None,
+                apiMethod=None,
+            )
+            self.thread = threading.Thread(
+                target=self.run,
+                args=(target,),
+                daemon=True,
+            )
             self.thread.start()
-
-    def configure_keys(self, keys=None, remove_id=None):
-        with self.lock:
-            if self.thread and self.thread.is_alive():
-                raise ValueError('Pause the import before changing API keys.')
-            if (keys is None)==(remove_id is None):
-                raise ValueError('Add keys or remove one key at a time.')
-            if keys is not None:
-                self.keys.add(keys)
-            elif isinstance(remove_id,str):
-                self.keys.remove(remove_id)
-            else:
-                raise ValueError('Choose a connected key to remove.')
-
     def pause(self):
         with self.lock:
             if self.thread and self.thread.is_alive():
@@ -869,7 +903,7 @@ class Collector:
         icon_url = f'https://ddragon.leagueoflegends.com/cdn/{ICON_VERSION}/img/profileicon/{icon}.png' if isinstance(icon,int) and icon>=0 else None
         return dict(account={'name':account.get('gameName','Llewellyn'),'tag':account.get('tagLine','300'),'puuid':account.get('puuid'),
                              'platform':'NA','queue':'Ranked Solo/Duo','iconUrl':icon_url,'level':account.get('summonerLevel')},connected=connected,
-                    job=state,matches=result,snapshotCount=snapshots,cachedMatches=cached,apiKeys=self.keys.summary(),
+                    job=state,matches=result,snapshotCount=snapshots,cachedMatches=cached,
                     methodology={'historyGames':WINDOW,'targetGames':TARGET,'queueId':QUEUE,'minimumDurationSeconds':180,
                                  'comparison':'Mean of four teammate win rates minus mean of five opponent win rates. Only complete 20-game histories enter comparisons.',
                                  'rank':'Rank at observation time, never claimed to be pre-match rank.',
@@ -910,7 +944,6 @@ def handler_class(collector, *, port=8766, public_origin=None):
                 return self.send(200,dict(collector.view(),csrf=csrf))
             if self.path == '/api/export':
                 observations = collector.view()
-                observations.pop('apiKeys',None)
                 return self.send(200,observations)
             return self.send(404,{'error':'Not found.'})
 
@@ -925,9 +958,7 @@ def handler_class(collector, *, port=8766, public_origin=None):
                 if not isinstance(body,dict):
                     raise ValueError('Expected an object.')
                 if self.path == '/api/import':
-                    collector.start(body.get('key'),body.get('riotId'))
-                elif self.path == '/api/keys':
-                    collector.configure_keys(body.get('keys'),body.get('removeId'))
+                    collector.start(body.get('riotId'))
                 elif self.path == '/api/pause':
                     collector.pause()
                 elif self.path == '/api/duo':
@@ -936,11 +967,11 @@ def handler_class(collector, *, port=8766, public_origin=None):
                     return self.send(404,{'error':'Not found.'})
                 return self.send(200,{'ok':True})
             except ValueError as e:
-                if self.path in ('/api/duo','/api/keys'):
+                if self.path in ('/api/duo','/api/import'):
                     return self.send(400,{'error':str(e)})
-                return self.send(400,{'error':'Check your key, or wait for the current import to stop before refreshing.'})
+                return self.send(400,{'error':'Wait for the current import to stop before refreshing.'})
             except TypeError:
-                return self.send(400,{'error':'Check your key, or wait for the current import to stop before refreshing.'})
+                return self.send(400,{'error':'Wait for the current import to stop before refreshing.'})
 
     return Handler
 
