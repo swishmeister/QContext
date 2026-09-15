@@ -38,9 +38,9 @@ test('built app serves assets, protects imports, and retains data without retain
     await exited;
   }
   t.after(stop);
-  async function start() {
+  async function start(riotKey = '') {
     processHandle = spawn(process.execPath, ['scripts/start-production.mjs'], { cwd: root, env: {
-      ...env, PORT: String(port), QUEUE_CONTEXT_PUBLIC_URL: origin, QUEUE_CONTEXT_PASSWORD: password,
+      ...env, DATABASE_URL: '', RIOT_API_KEY: riotKey, PORT: String(port), QUEUE_CONTEXT_PUBLIC_URL: origin, QUEUE_CONTEXT_PASSWORD: password,
       QUEUE_CONTEXT_DATA_DIR: dataDir, QUEUE_CONTEXT_WEB_PORT: String(webPort), QUEUE_CONTEXT_COLLECTOR_PORT: String(collectorPort),
     }, stdio: ['ignore', 'pipe', 'pipe'] });
     processHandle.stdout.on('data', chunk => { log += chunk; });
@@ -52,7 +52,7 @@ test('built app serves assets, protects imports, and retains data without retain
     }
     assert.fail(`Production startup timed out: ${log}`);
   }
-  await start();
+  await start('RGAPI-' + 'x'.repeat(24));
   assert.equal((await fetch(origin + '/')).status, 401);
   const page = await fetch(origin + '/', { headers });
   assert.equal(page.status, 200);
@@ -67,9 +67,12 @@ test('built app serves assets, protects imports, and retains data without retain
   const body = JSON.stringify({ keys: ['RGAPI-' + 'x'.repeat(24)] });
   const postHeaders = { ...headers, origin, 'content-type': 'application/json' };
   assert.equal((await fetch(origin + '/api/keys', { method: 'POST', headers: postHeaders, body })).status, 403);
-  assert.equal((await fetch(origin + '/api/keys', { method: 'POST', headers: { ...postHeaders, 'x-queue-lab-token': status.csrf }, body })).status, 200);
+  assert.equal((await fetch(origin + '/api/keys', { method: 'POST', headers: { ...postHeaders, 'x-queue-lab-token': status.csrf }, body })).status, 404);
   const connected = await (await fetch(origin + '/api/status', { headers })).json();
-  assert.equal(connected.apiKeys.length, 1);
+  assert.equal(connected.connected, true);
+  assert.equal(connected.apiKeys, undefined);
+  assert.ok(!JSON.stringify(connected).includes('RGAPI-' + 'x'.repeat(24)));
+  assert.equal((await fetch(origin + '/api/pause', { method: 'POST', headers: { ...postHeaders, 'x-queue-lab-token': status.csrf }, body: '{}' })).status, 200);
   const exported = await (await fetch(origin + '/api/export', { headers })).json();
   assert.equal(exported.apiKeys, undefined);
   assert.equal(exported.csrf, undefined);
@@ -78,7 +81,8 @@ test('built app serves assets, protects imports, and retains data without retain
   await start();
   const restarted = await (await fetch(origin + '/api/status', { headers })).json();
   assert.equal(restarted.account.name, 'Synthetic');
-  assert.deepEqual(restarted.apiKeys, []);
+  assert.equal(restarted.connected, false);
+  assert.equal(restarted.apiKeys, undefined);
   assert.notEqual(restarted.csrf, status.csrf);
   assert.ok(!log.includes(password));
   assert.ok(!log.includes('RGAPI-' + 'x'.repeat(24)));

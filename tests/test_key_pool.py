@@ -229,19 +229,15 @@ class PoolTests(unittest.TestCase):
             self.assertEqual(len(set(fetched)),21)
             self.assertTrue(all(slot.requests>0 for slot in collector.keys.slots))
 
-    def test_configuring_keys_does_not_start_import_or_write_secrets(self):
+    def test_server_key_does_not_start_import_or_write_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
             store=Store(Path(directory)/'test.sqlite3')
-            collector=Collector(store)
             secret='RGAPI-'+('z'*24)
-            collector.configure_keys([secret])
+            with patch.dict('os.environ', {'RIOT_API_KEY': secret}):
+                collector=Collector(store)
             self.assertIsNone(collector.thread)
             self.assertTrue(collector.view()['connected'])
             self.assertNotIn(secret,json.dumps(collector.view()))
             self.assertNotIn(secret,Path(store.path).read_bytes().decode(errors='ignore'))
-            self.assertFalse(Collector(store).view()['connected'])
-            with patch.object(collector,'thread') as worker:
-                worker.is_alive.return_value=True
-                with self.assertRaises(ValueError):
-                    collector.configure_keys(remove_id=collector.keys.slots[0].id)
-            self.assertTrue(collector.keys.usable())
+            with patch.dict('os.environ', {'RIOT_API_KEY': ''}):
+                self.assertFalse(Collector(store).view()['connected'])

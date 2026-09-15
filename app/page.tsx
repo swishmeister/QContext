@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, ArrowDownToLine, Database, Pause, RefreshCw, ChevronDown, Check, AlertCircle, Search, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -28,20 +28,30 @@ export default function Home() {
   const [selected,setSelected] = useState<string|null>(null);
   const [exporting,setExporting] = useState(false);
   const [search,setSearch] = useState('Llewellyn#300');
+  const statusRequest = useRef<Promise<Status>|null>(null);
   const profile=data?.account??{name:'Llewellyn',tag:'300',platform:'NA'};
   useEffect(()=>{if(data?.account){setSearch(`${data.account.name}#${data.account.tag}`);setSelected(null);}},[data?.account?.puuid]);
-  const load = useCallback(async()=>{
-    const response = await fetch('/api/status',{cache:'no-store'});
-    if(!response.ok) throw new Error('Collector unavailable');
-    const value:Status = await response.json();
-    setData(value);setOnline(true);
-    return value;
+  const load = useCallback(()=>{
+    if(statusRequest.current)return statusRequest.current;
+    const request=(async()=>{
+      const response = await fetch('/api/status',{cache:'no-store',signal:AbortSignal.timeout(35000)});
+      if(!response.ok) throw new Error('Collector unavailable');
+      const value:Status = await response.json();
+      setData(value);setOnline(true);
+      return value;
+    })();
+    statusRequest.current=request.finally(()=>{statusRequest.current=null;});
+    return statusRequest.current;
   },[]);
   useEffect(()=>{
     let mounted=true;
-    const poll=async()=>{try{if(mounted)await load();}catch{if(mounted)setOnline(false);}};
-    void poll();const timer=setInterval(()=>void poll(),4000);
-    return()=>{mounted=false;clearInterval(timer);};
+    let timer:ReturnType<typeof setTimeout>;
+    const poll=async()=>{
+      try{await load();}catch{if(mounted)setOnline(false);}
+      finally{if(mounted)timer=setTimeout(()=>void poll(),4000);}
+    };
+    void poll();
+    return()=>{mounted=false;clearTimeout(timer);};
   },[load]);
   const action=useCallback(async(path:string,body:object={})=>{
     setPending(true);setError('');
