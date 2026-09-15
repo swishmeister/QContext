@@ -288,6 +288,34 @@ class Store:
             row = self.execute(db, 'SELECT payload FROM matches WHERE id=?', (match_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def matches_by_id(self, match_ids):
+        ids = list(dict.fromkeys(match_ids))
+        if not ids:
+            return {}
+        with self.connect() as db:
+            rows = self.execute(db, f'SELECT id,payload FROM matches WHERE id IN ({",".join("?" for _ in ids)})', ids).fetchall()
+        return {mid: json.loads(payload) for mid, payload in rows}
+
+    def windows_for(self, puuids, before_ms):
+        ids = list(dict.fromkeys(puuids))
+        if not ids:
+            return {}
+        with self.connect() as db:
+            rows = self.execute(db, f'SELECT puuid,payload FROM windows WHERE before_ms=? AND puuid IN ({",".join("?" for _ in ids)})', [before_ms, *ids]).fetchall()
+        return {puuid: json.loads(payload) for puuid, payload in rows}
+
+    def snapshots_for(self, puuids):
+        ids = list(dict.fromkeys(puuids))
+        if not ids:
+            return {}
+        with self.connect() as db:
+            rows = self.execute(db, f'''SELECT puuid,observed_ms,payload FROM (
+                SELECT puuid,observed_ms,payload,
+                    ROW_NUMBER() OVER (PARTITION BY puuid ORDER BY observed_ms DESC,id DESC) AS position
+                FROM snapshots WHERE puuid IN ({",".join("?" for _ in ids)})
+            ) AS latest WHERE position=1''', ids).fetchall()
+        return {puuid: dict(observedAt=at, **json.loads(payload)) for puuid, at, payload in rows}
+
     def put_match(self, match):
         with self.connect() as db:
             self.execute(
@@ -893,37 +921,57 @@ class Collector:
             state = dict(self.state)
             connected = self.keys.usable()
         result = []
-        for mid in self.store.setting('anchors',[]):
-            match = self.store.match(mid)
+        anchor_ids = self.store.setting('anchors', [])
+        anchors = self.store.matches_by_id(anchor_ids)
+        snapshots = self.store.snapshots_for(p['puuid'] for match in anchors.values() for p in match['info']['participants'])
+        for mid in anchor_ids:
+            match = anchors.get(mid)
             if not match or not self.account:
                 continue
             me = participant(match,self.account['puuid'])
             if not me:
                 continue
             start,_,duration = timing(match)
+            roster = match['info']['participants']
+            windows = self.store.windows_for((p['puuid'] for p in roster), start)
+            cache_keys = {}
+            needed = set()
+            for p in roster:
+                saved = windows.get(p['puuid'])
+                if saved:
+                    key = (p['puuid'],start,p.get('championName'),p.get('teamPosition'),tuple(saved['ids']),saved.get('missing',0))
+                    cache_keys[p['puuid']] = key
+                    if key not in self.summary_cache:
+                        needed.update(saved['ids'])
+            # Duo detection also needs shared history records, even with warm summaries.
+            for a, b in combinations(roster, 2):
+                if a['teamId'] == b['teamId']:
+                    needed.update(set(windows.get(a['puuid'], {}).get('ids', [])) & set(windows.get(b['puuid'], {}).get('ids', [])))
+            # Limit raw-record memory to one roster's histories, rather than all 20 rosters.
+            records = self.store.matches_by_id(sorted(needed))
             people = []
-            for p in match['info']['participants']:
-                saved = self.store.window(p['puuid'],start)
+            for p in roster:
+                saved = windows.get(p['puuid'])
                 hist = None
                 if saved:
-                    cache_key = (p['puuid'],start,p.get('championName'),p.get('teamPosition'),tuple(saved['ids']),saved.get('missing',0))
+                    cache_key = cache_keys[p['puuid']]
                     hist = self.summary_cache.get(cache_key)
                     if hist is None:
-                        games = [g for key in saved['ids'] if (g:=self.store.match(key))]
+                        games = [g for key in saved['ids'] if (g:=records.get(key))]
                         hist = summarize_history(games,p['puuid'],start,p.get('championName'),p.get('teamPosition'),saved.get('missing',0))
                         self.summary_cache[cache_key] = hist
                 people.append(dict(puuid=p['puuid'],name=p.get('riotIdGameName') or p.get('summonerName') or 'Unknown player',
                                    tag=p.get('riotIdTagline',''),champion=p.get('championName',''),championId=p.get('championId'),
                                    profileIconId=p.get('profileIcon'),role=p.get('teamPosition',''),
                                    level=p.get('summonerLevel'),team=p['teamId'],isSelf=p['puuid']==self.account['puuid'],
-                                   history=hist,rankSnapshot=self.store.snapshot(p['puuid'])))
+                                   history=hist,rankSnapshot=snapshots.get(p['puuid'])))
             allies = [p for p in people if p['team']==me['teamId'] and not p['isSelf']]
             enemies = [p for p in people if p['team']!=me['teamId']]
             complete = len(allies)==4 and len(enemies)==5 and all(p['history'] and p['history']['complete'] for p in allies+enemies)
             ally_mean = round(mean(p['history']['winRate'] for p in allies),2) if complete else None
             enemy_mean = round(mean(p['history']['winRate'] for p in enemies),2) if complete else None
             result.append(dict(id=mid,startedAt=start,duration=duration,win=bool(me['win']),champion=me.get('championName'),
-                               duoPairs=duo_pairs(match,people,self.store.match,self.store.duo_tags(mid)),
+                               duoPairs=duo_pairs(match,people,records.get,self.store.duo_tags(mid)),
                                teamRanks={'allies':average_rank([p for p in people if p['team']==me['teamId']]),'enemies':average_rank(enemies)},
                                team=me['teamId'],participants=people,complete=complete,allyMean=ally_mean,enemyMean=enemy_mean,
                                gap=round(ally_mean-enemy_mean,2) if complete else None,
@@ -934,7 +982,7 @@ class Collector:
         account = self.account or {}
         icon = account.get('profileIconId')
         if icon is None and result:
-            latest = self.store.match(result[0]['id'])
+            latest = anchors[result[0]['id']]
             icon = (participant(latest,account['puuid']) or {}).get('profileIcon')
         icon_url = f'https://ddragon.leagueoflegends.com/cdn/{ICON_VERSION}/img/profileicon/{icon}.png' if isinstance(icon,int) and icon>=0 else None
         return dict(account={'name':account.get('gameName','Llewellyn'),'tag':account.get('tagLine','300'),'puuid':account.get('puuid'),
